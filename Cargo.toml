@@ -1,0 +1,62 @@
+[package]
+name = "eoka"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Undetectable browser automation for AI agents"
+keywords = ["browser", "automation", "stealth", "chrome", "ai-agent"]
+categories = ["web-programming", "development-tools"]
+repository = "https://github.com/cbxss/eoka"
+
+[features]
+default = []
+annotate = ["image", "imageproc"]  # Screenshot annotations
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["io-util", "process", "sync", "rt-multi-thread", "macros", "net", "time"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+
+# Binary patching
+aho-corasick = "1"
+memmap2 = "0.9"
+
+# Human simulation
+rand = "0.8"
+smallvec = "1"
+
+# Screenshot annotations (optional)
+image = { version = "0.25", optional = true }
+imageproc = { version = "0.25", optional = true }
+
+# Base64 for screenshots
+base64 = "0.22"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "detection_test"
+path = "examples/detection_test.rs"
+
+[[example]]
+name = "rebrowser_test"
+path = "examples/rebrowser_test.rs"
+
+[[example]]
+name = "request_capture"
+path = "examples/request_capture.rs"

@@ -218,7 +218,6 @@ impl Session {
                 &PageCaptureScreenshot {
                     format: format.map(String::from),
                     quality,
-                    ..Default::default()
                 },
             )
             .await?;
@@ -300,7 +299,6 @@ impl Session {
                 text: text.map(String::from),
                 code: code.map(String::from),
                 key: key.map(String::from),
-                ..Default::default()
             },
         )
         .await?;
@@ -368,7 +366,6 @@ impl Session {
                 "DOM.getBoxModel",
                 &DOMGetBoxModel {
                     node_id: Some(node_id),
-                    ..Default::default()
                 },
             )
             .await?;
@@ -382,7 +379,6 @@ impl Session {
                 "DOM.getOuterHTML",
                 &DOMGetOuterHTML {
                     node_id: Some(node_id),
-                    ..Default::default()
                 },
             )
             .await?;
@@ -397,7 +393,6 @@ impl Session {
                 &DOMResolveNode {
                     node_id: Some(node_id),
                     object_group: Some("eoka".to_string()),
-                    ..Default::default()
                 },
             )
             .await?;
@@ -427,7 +422,6 @@ impl Session {
             "DOM.focus",
             &DOMFocus {
                 node_id: Some(node_id),
-                ..Default::default()
             },
         )
         .await?;

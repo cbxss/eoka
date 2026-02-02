@@ -190,15 +190,34 @@ impl Session {
 
     /// Go back in history
     pub async fn go_back(&self) -> Result<()> {
-        self.send::<_, serde_json::Value>("Page.goBack", &PageGoBack {})
+        let history: PageGetNavigationHistoryResult = self
+            .send("Page.getNavigationHistory", &PageGetNavigationHistory {})
             .await?;
+        if history.current_index > 0 {
+            let entry_id = history.entries[history.current_index as usize - 1].id;
+            self.send::<_, serde_json::Value>(
+                "Page.navigateToHistoryEntry",
+                &PageNavigateToHistoryEntry { entry_id },
+            )
+            .await?;
+        }
         Ok(())
     }
 
     /// Go forward in history
     pub async fn go_forward(&self) -> Result<()> {
-        self.send::<_, serde_json::Value>("Page.goForward", &PageGoForward {})
+        let history: PageGetNavigationHistoryResult = self
+            .send("Page.getNavigationHistory", &PageGetNavigationHistory {})
             .await?;
+        let next = history.current_index as usize + 1;
+        if next < history.entries.len() {
+            let entry_id = history.entries[next].id;
+            self.send::<_, serde_json::Value>(
+                "Page.navigateToHistoryEntry",
+                &PageNavigateToHistoryEntry { entry_id },
+            )
+            .await?;
+        }
         Ok(())
     }
 

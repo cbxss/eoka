@@ -1553,27 +1553,12 @@ impl<'a> Element<'a> {
     ///
     /// Extracts text content from the element's outerHTML without using focus.
     pub async fn text(&self) -> Result<String> {
-        // Get outerHTML and extract text via JavaScript without changing focus
-        let html = self.page.session.get_outer_html(self.node_id).await?;
-        let escaped_html = escape_js_string(&html);
-
-        let result = self
-            .page
-            .session
-            .evaluate(&format!(
-                r#"(() => {{
-                const div = document.createElement('div');
-                div.innerHTML = '{}';
-                return div.innerText || div.textContent || '';
-            }})()"#,
-                escaped_html
-            ))
+        let value = self
+            .eval_on_element("document.activeElement.textContent || ''")
             .await?;
 
-        if let Some(value) = result.result.value {
-            if let Some(s) = value.as_str() {
-                return Ok(s.to_string());
-            }
+        if let Some(s) = value.as_str() {
+            return Ok(s.to_string());
         }
         Ok(String::new())
     }

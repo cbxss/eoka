@@ -138,13 +138,34 @@ pub struct PageReload {
     pub script_to_evaluate_on_load: Option<String>,
 }
 
-/// Go back in history
+/// Get navigation history
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct PageGoBack {}
+pub struct PageGetNavigationHistory {}
 
-/// Go forward in history
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct PageGoForward {}
+/// Navigation history result
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageGetNavigationHistoryResult {
+    pub current_index: i32,
+    pub entries: Vec<NavigationEntry>,
+}
+
+/// A navigation history entry
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NavigationEntry {
+    pub id: i32,
+    pub url: String,
+    pub user_typed_url: Option<String>,
+    pub title: String,
+}
+
+/// Navigate to a specific history entry
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageNavigateToHistoryEntry {
+    pub entry_id: i32,
+}
 
 /// Add script to evaluate on new document
 #[derive(Debug, Clone, Serialize)]

@@ -1,6 +1,6 @@
 [package]
 name = "eoka"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 description = "Undetectable browser automation for AI agents"
@@ -11,9 +11,6 @@ homepage = "https://github.com/cbxss/eoka"
 documentation = "https://docs.rs/eoka"
 readme = "README.md"
 authors = ["cbxss"]
-
-[features]
-default = []
 
 [dependencies]
 # Async runtime

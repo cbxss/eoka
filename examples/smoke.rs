@@ -134,7 +134,96 @@ async fn main() -> Result<()> {
     assert_eq!(result, "hello world");
     println!("13. JS evaluate: ok");
 
-    // === Network: real page ===
+    // === is_visible + bounding_box ===
+    page.goto(r#"data:text/html,<div id="vis">Visible</div><div id="hid" style="display:none">Hidden</div>"#).await?;
+    page.wait(300).await;
+    let vis = page.find("#vis").await?;
+    assert!(vis.is_visible().await?);
+    let bbox = vis.bounding_box().await;
+    assert!(bbox.is_some());
+    let hid = page.find("#hid").await?;
+    assert!(!hid.is_visible().await?);
+    let bbox = hid.bounding_box().await;
+    assert!(bbox.is_none());
+    println!("14. is_visible + bounding_box: ok");
+
+    // === is_checked + value ===
+    page.goto(r#"data:text/html,<input id="cb" type="checkbox"><input id="txt" type="text" value="hello">"#).await?;
+    page.wait(300).await;
+    let cb = page.find("#cb").await?;
+    assert!(!cb.is_checked().await?);
+    page.execute("document.getElementById('cb').checked = true")
+        .await?;
+    let cb = page.find("#cb").await?;
+    assert!(cb.is_checked().await?);
+    let txt = page.find("#txt").await?;
+    assert_eq!(txt.value().await?, "hello");
+    println!("15. is_checked + value: ok");
+
+    // === css computed style ===
+    page.goto(r#"data:text/html,<div id="styled" style="color: rgb(255, 0, 0); font-size: 20px;">Red</div>"#).await?;
+    page.wait(300).await;
+    let el = page.find("#styled").await?;
+    let color = el.css("color").await?;
+    assert_eq!(color, "rgb(255, 0, 0)");
+    println!("16. css: ok");
+
+    // === Element::text ===
+    page.goto(r#"data:text/html,<p id="t">Hello World</p>"#)
+        .await?;
+    page.wait(300).await;
+    let el = page.find("#t").await?;
+    let text = el.text().await?;
+    assert_eq!(text, "Hello World");
+    println!("17. Element::text: ok");
+
+    // === wait_for_url_contains ===
+    page.wait_for_url_contains("data:", 5000).await?;
+    println!("18. wait_for_url_contains: ok");
+
+    // === find_all_by_text ===
+    page.goto(r#"data:text/html,<div>Apple</div><span>Apple</span><p>Apple</p><div>Banana</div>"#)
+        .await?;
+    page.wait(300).await;
+    let matches = page.find_all_by_text("Apple").await?;
+    assert_eq!(matches.len(), 3);
+    println!("19. find_all_by_text: ok (found {})", matches.len());
+
+    // === with_retry ===
+    let attempt_count = std::sync::atomic::AtomicU32::new(0);
+    let result = page
+        .with_retry(3, 100, || {
+            let current = attempt_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            async move {
+                if current < 3 {
+                    Err(eoka::Error::Timeout("not yet".into()))
+                } else {
+                    Ok("done")
+                }
+            }
+        })
+        .await?;
+    assert_eq!(result, "done");
+    println!("20. with_retry: ok");
+
+    // === content + text (page-level) ===
+    page.goto(r#"data:text/html,<!DOCTYPE html><html><body><p>Page text here</p></body></html>"#)
+        .await?;
+    page.wait(300).await;
+    let html = page.content().await?;
+    assert!(html.contains("<p>Page text here</p>"));
+    let text = page.text().await?;
+    assert!(text.contains("Page text here"));
+    assert!(!text.contains("<p>"));
+    println!("21. content + text: ok");
+
+    // === screenshot_jpeg ===
+    let jpeg = page.screenshot_jpeg(80).await?;
+    assert!(jpeg.len() > 100);
+    assert_eq!(&jpeg[0..2], &[0xFF, 0xD8]);
+    println!("22. screenshot_jpeg: ok ({} bytes)", jpeg.len());
+
+    // === Network: real page (last because cross-origin nav disrupts CDP) ===
     page.enable_request_capture().await?;
     page.goto("https://example.com").await?;
     page.wait(2000).await;
@@ -143,7 +232,7 @@ async fn main() -> Result<()> {
     let title = page.title().await?;
     assert!(!title.is_empty());
     page.disable_request_capture().await?;
-    println!("14. Network + real page: ok (url={}, title={})", url, title);
+    println!("23. Network + real page: ok (url={}, title={})", url, title);
 
     // === Cookies ===
     page.set_cookie("test_cookie", "test_value", Some("example.com"), Some("/"))
@@ -153,9 +242,9 @@ async fn main() -> Result<()> {
         .iter()
         .any(|c| c.name == "test_cookie" && c.value == "test_value");
     assert!(found, "Cookie not found");
-    println!("15. Cookies: ok");
+    println!("24. Cookies: ok");
 
     browser.close().await?;
-    println!("\n=== ALL 15 SMOKE TESTS PASSED ===");
+    println!("\n=== ALL 24 SMOKE TESTS PASSED ===");
     Ok(())
 }

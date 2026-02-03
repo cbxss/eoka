@@ -1010,7 +1010,9 @@ impl Page {
         self.execute(&format!(
             r#"(() => {{
                 const el = document.querySelector('{escaped_sel}');
-                if (!el) throw new Error('Select element not found');
+                if (!el) throw new Error('Select element not found: {escaped_sel}');
+                const opt = Array.from(el.options).find(o => o.value === '{escaped_val}');
+                if (!opt) throw new Error('Option value not found: {escaped_val}');
                 el.value = '{escaped_val}';
                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
             }})()"#
@@ -1080,32 +1082,19 @@ impl Page {
     }
 
     /// Hover over an element with human-like mouse movement
+    ///
+    /// Uses Bezier curves to simulate natural mouse movement to the element.
     pub async fn human_hover(&self, selector: &str) -> Result<()> {
         let element = self.find(selector).await?;
         element.scroll_into_view().await?;
-        let (x, y) = element.center().await?;
+        let (target_x, target_y) = element.center().await?;
 
-        // Use human movement to reach the element but don't click
+        // Use Human helper for realistic mouse movement (same as human_click but no click)
         let human = Human::new(&self.session);
-        // Move through a bezier path to the target
-        let start_x = x - 100.0;
-        let start_y = y - 50.0;
-
-        // Just move to the element
-        self.session
-            .dispatch_mouse_event(MouseEventType::MouseMoved, start_x, start_y, None, None)
-            .await?;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Final move to target with human's internal bezier would be better,
-        // but for now just move directly with a small delay
-        self.session
-            .dispatch_mouse_event(MouseEventType::MouseMoved, x, y, None, None)
-            .await?;
+        human.move_to(target_x, target_y).await?;
 
         // Brief pause to let hover effects trigger
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let _ = human; // silence unused warning
         Ok(())
     }
 
@@ -1560,5 +1549,125 @@ impl<'a> Element<'a> {
             )
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_key_combo_simple() {
+        let (mods, key) = parse_key_combo("Enter");
+        assert_eq!(mods, 0);
+        assert_eq!(key, "Enter");
+    }
+
+    #[test]
+    fn test_parse_key_combo_ctrl() {
+        use crate::cdp::types::modifiers;
+        let (mods, key) = parse_key_combo("Ctrl+A");
+        assert_eq!(mods, modifiers::CTRL);
+        assert_eq!(key, "A");
+    }
+
+    #[test]
+    fn test_parse_key_combo_cmd_shift() {
+        use crate::cdp::types::modifiers;
+        let (mods, key) = parse_key_combo("Cmd+Shift+S");
+        assert_eq!(mods, modifiers::META | modifiers::SHIFT);
+        assert_eq!(key, "S");
+    }
+
+    #[test]
+    fn test_parse_key_combo_all_modifiers() {
+        use crate::cdp::types::modifiers;
+        let (mods, key) = parse_key_combo("Ctrl+Alt+Shift+Cmd+X");
+        assert_eq!(
+            mods,
+            modifiers::CTRL | modifiers::ALT | modifiers::SHIFT | modifiers::META
+        );
+        assert_eq!(key, "X");
+    }
+
+    #[test]
+    fn test_parse_key_combo_case_insensitive() {
+        use crate::cdp::types::modifiers;
+        let (mods, key) = parse_key_combo("ctrl+a");
+        assert_eq!(mods, modifiers::CTRL);
+        assert_eq!(key, "a");
+    }
+
+    #[test]
+    fn test_key_to_codes_enter() {
+        let (key, code, vk) = key_to_codes("Enter");
+        assert_eq!(key, "Enter");
+        assert_eq!(code, "Enter");
+        assert_eq!(vk, Some(13));
+    }
+
+    #[test]
+    fn test_key_to_codes_tab() {
+        let (key, code, vk) = key_to_codes("Tab");
+        assert_eq!(key, "Tab");
+        assert_eq!(code, "Tab");
+        assert_eq!(vk, Some(9));
+    }
+
+    #[test]
+    fn test_key_to_codes_letter() {
+        let (key, code, vk) = key_to_codes("a");
+        assert_eq!(key, "a");
+        assert_eq!(code, "KeyA");
+        assert_eq!(vk, Some(65));
+    }
+
+    #[test]
+    fn test_key_to_codes_arrow() {
+        let (key, code, vk) = key_to_codes("ArrowDown");
+        assert_eq!(key, "ArrowDown");
+        assert_eq!(code, "ArrowDown");
+        assert_eq!(vk, Some(40));
+    }
+
+    #[test]
+    fn test_key_to_codes_case_insensitive() {
+        let (key, code, vk) = key_to_codes("ESCAPE");
+        assert_eq!(key, "Escape");
+        assert_eq!(code, "Escape");
+        assert_eq!(vk, Some(27));
+    }
+
+    #[test]
+    fn test_key_to_codes_alias() {
+        // "esc" should work as alias for "Escape"
+        let (key, code, vk) = key_to_codes("esc");
+        assert_eq!(key, "Escape");
+        assert_eq!(code, "Escape");
+        assert_eq!(vk, Some(27));
+
+        // "up" should work as alias for "ArrowUp"
+        let (key, code, vk) = key_to_codes("up");
+        assert_eq!(key, "ArrowUp");
+        assert_eq!(code, "ArrowUp");
+        assert_eq!(vk, Some(38));
+    }
+
+    #[test]
+    fn test_key_to_codes_unknown() {
+        // Unknown keys should pass through
+        let (key, code, vk) = key_to_codes("SomeWeirdKey");
+        assert_eq!(key, "SomeWeirdKey");
+        assert_eq!(code, "SomeWeirdKey");
+        assert_eq!(vk, None);
+    }
+
+    #[test]
+    fn test_escape_js_string() {
+        assert_eq!(escape_js_string("hello"), "hello");
+        assert_eq!(escape_js_string("it's"), "it\\'s");
+        assert_eq!(escape_js_string("line1\nline2"), "line1\\nline2");
+        assert_eq!(escape_js_string("back\\slash"), "back\\\\slash");
+        assert_eq!(escape_js_string("${var}"), "\\${var}");
     }
 }

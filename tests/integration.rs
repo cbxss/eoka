@@ -435,3 +435,264 @@ async fn test_type_into_input() {
 
     browser.close().await.expect("Failed to close browser");
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn test_select_dropdown() {
+    if !chrome_available() {
+        eprintln!("Chrome not found, skipping test");
+        return;
+    }
+
+    let browser = Browser::launch().await.expect("Failed to launch browser");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
+
+    page.goto(
+        r#"data:text/html,
+        <select id="country">
+            <option value="us">United States</option>
+            <option value="uk">United Kingdom</option>
+            <option value="de">Germany</option>
+        </select>
+    "#,
+    )
+    .await
+    .expect("Failed to navigate");
+
+    // Select by value
+    page.select("#country", "uk").await.expect("Failed to select");
+
+    let value: String = page
+        .evaluate("document.getElementById('country').value")
+        .await
+        .expect("Failed to evaluate");
+    assert_eq!(value, "uk");
+
+    // Select by text
+    page.select_by_text("#country", "Germany")
+        .await
+        .expect("Failed to select by text");
+
+    let value: String = page
+        .evaluate("document.getElementById('country').value")
+        .await
+        .expect("Failed to evaluate");
+    assert_eq!(value, "de");
+
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn test_select_invalid_option() {
+    if !chrome_available() {
+        eprintln!("Chrome not found, skipping test");
+        return;
+    }
+
+    let browser = Browser::launch().await.expect("Failed to launch browser");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
+
+    page.goto(
+        r#"data:text/html,
+        <select id="country">
+            <option value="us">United States</option>
+        </select>
+    "#,
+    )
+    .await
+    .expect("Failed to navigate");
+
+    // Try to select non-existent value - should error
+    let result = page.select("#country", "invalid").await;
+    assert!(result.is_err());
+
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn test_hover() {
+    if !chrome_available() {
+        eprintln!("Chrome not found, skipping test");
+        return;
+    }
+
+    let browser = Browser::launch().await.expect("Failed to launch browser");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
+
+    // Simpler data URI without newlines
+    page.goto("data:text/html,<div id='target' style='width:100px;height:100px;background:blue'></div><script>window.hovered=false;document.getElementById('target').onmouseenter=()=>{window.hovered=true};</script>")
+        .await
+        .expect("Failed to navigate");
+
+    // Small delay for page to render
+    page.wait(200).await;
+
+    // Hover over the element
+    page.hover("#target").await.expect("Failed to hover");
+
+    // Check that hover was triggered
+    let hovered: bool = page
+        .evaluate("window.hovered")
+        .await
+        .expect("Failed to evaluate");
+    assert!(hovered);
+
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn test_press_key() {
+    if !chrome_available() {
+        eprintln!("Chrome not found, skipping test");
+        return;
+    }
+
+    let browser = Browser::launch().await.expect("Failed to launch browser");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
+
+    page.goto(
+        r#"data:text/html,
+        <input type="text" id="input" autofocus>
+        <script>
+            window.lastKey = '';
+            document.getElementById('input').addEventListener('keydown', (e) => {
+                window.lastKey = e.key;
+            });
+        </script>
+    "#,
+    )
+    .await
+    .expect("Failed to navigate");
+
+    // Wait for autofocus
+    page.wait(100).await;
+
+    // Press Enter
+    page.press_key("Enter").await.expect("Failed to press key");
+
+    let key: String = page
+        .evaluate("window.lastKey")
+        .await
+        .expect("Failed to evaluate");
+    assert_eq!(key, "Enter");
+
+    // Press Tab
+    page.press_tab().await.expect("Failed to press tab");
+
+    let key: String = page
+        .evaluate("window.lastKey")
+        .await
+        .expect("Failed to evaluate");
+    assert_eq!(key, "Tab");
+
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn test_upload_file() {
+    if !chrome_available() {
+        eprintln!("Chrome not found, skipping test");
+        return;
+    }
+
+    let browser = Browser::launch().await.expect("Failed to launch browser");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
+
+    page.goto(
+        r#"data:text/html,
+        <input type="file" id="upload">
+        <script>
+            window.filename = '';
+            document.getElementById('upload').addEventListener('change', (e) => {
+                window.filename = e.target.files[0]?.name || '';
+            });
+        </script>
+    "#,
+    )
+    .await
+    .expect("Failed to navigate");
+
+    // Create a temp file
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join("eoka_test_upload.txt");
+    std::fs::write(&temp_file, "test content").expect("Failed to write temp file");
+
+    // Upload the file
+    page.upload_file("#upload", temp_file.to_str().unwrap())
+        .await
+        .expect("Failed to upload file");
+
+    // Check that the file was uploaded
+    let filename: String = page
+        .evaluate("window.filename")
+        .await
+        .expect("Failed to evaluate");
+    assert_eq!(filename, "eoka_test_upload.txt");
+
+    // Clean up
+    std::fs::remove_file(&temp_file).ok();
+
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn test_select_multiple() {
+    if !chrome_available() {
+        eprintln!("Chrome not found, skipping test");
+        return;
+    }
+
+    let browser = Browser::launch().await.expect("Failed to launch browser");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
+
+    page.goto(
+        r#"data:text/html,
+        <select id="tags" multiple>
+            <option value="rust">Rust</option>
+            <option value="async">Async</option>
+            <option value="web">Web</option>
+        </select>
+    "#,
+    )
+    .await
+    .expect("Failed to navigate");
+
+    // Select multiple options
+    page.select_multiple("#tags", &["rust", "web"])
+        .await
+        .expect("Failed to select multiple");
+
+    // Check selected values
+    let selected: Vec<String> = page
+        .evaluate(
+            "Array.from(document.getElementById('tags').selectedOptions).map(o => o.value)",
+        )
+        .await
+        .expect("Failed to evaluate");
+    assert_eq!(selected, vec!["rust", "web"]);
+
+    browser.close().await.expect("Failed to close browser");
+}

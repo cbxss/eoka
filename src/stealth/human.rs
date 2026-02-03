@@ -127,8 +127,8 @@ impl<'a> Human<'a> {
         self
     }
 
-    /// Move mouse to target and click
-    pub async fn move_and_click(&self, target_x: f64, target_y: f64) -> Result<()> {
+    /// Move mouse to target position with human-like Bezier curve
+    pub async fn move_to(&self, target_x: f64, target_y: f64) -> Result<()> {
         // Start from random position
         let start_x = random_f64_range(100.0, 800.0);
         let start_y = random_f64_range(100.0, 600.0);
@@ -146,6 +146,13 @@ impl<'a> Human<'a> {
                 .await?;
             sleep(Duration::from_millis(random_range(min_delay, max_delay))).await;
         }
+
+        Ok(())
+    }
+
+    /// Move mouse to target and click
+    pub async fn move_and_click(&self, target_x: f64, target_y: f64) -> Result<()> {
+        self.move_to(target_x, target_y).await?;
 
         // Small delay before click
         sleep(Duration::from_millis(random_range(50, 150))).await;

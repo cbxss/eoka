@@ -982,7 +982,10 @@ impl Page {
     pub async fn upload_files(&self, selector: &str, paths: &[&str]) -> Result<()> {
         let element = self.find(selector).await?;
         self.session
-            .set_file_input_files(element.node_id, paths.iter().map(|p| p.to_string()).collect())
+            .set_file_input_files(
+                element.node_id,
+                paths.iter().map(|p| p.to_string()).collect(),
+            )
             .await
     }
 
@@ -1014,7 +1017,9 @@ impl Page {
     /// Hover over element (for revealing menus)
     pub async fn hover(&self, selector: &str) -> Result<()> {
         let (x, y) = self.find(selector).await?.center().await?;
-        self.session.dispatch_mouse_event(MouseEventType::MouseMoved, x, y, None, None).await
+        self.session
+            .dispatch_mouse_event(MouseEventType::MouseMoved, x, y, None, None)
+            .await
     }
 
     /// Human-like hover with Bezier curve movement
@@ -1035,34 +1040,61 @@ impl Page {
         let (key_str, code_str, vk) = key_to_codes(key_name);
         let modifiers = if mods != 0 { Some(mods) } else { None };
 
-        self.session.dispatch_key_event_full(InputDispatchKeyEventFull {
-            r#type: KeyEventType::KeyDown,
-            modifiers, key: Some(key_str.into()), code: Some(code_str.into()),
-            windows_virtual_key_code: vk, native_virtual_key_code: vk, ..Default::default()
-        }).await?;
+        self.session
+            .dispatch_key_event_full(InputDispatchKeyEventFull {
+                r#type: KeyEventType::KeyDown,
+                modifiers,
+                key: Some(key_str.into()),
+                code: Some(code_str.into()),
+                windows_virtual_key_code: vk,
+                native_virtual_key_code: vk,
+                ..Default::default()
+            })
+            .await?;
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        self.session.dispatch_key_event_full(InputDispatchKeyEventFull {
-            r#type: KeyEventType::KeyUp,
-            modifiers, key: Some(key_str.into()), code: Some(code_str.into()),
-            windows_virtual_key_code: vk, native_virtual_key_code: vk, ..Default::default()
-        }).await
+        self.session
+            .dispatch_key_event_full(InputDispatchKeyEventFull {
+                r#type: KeyEventType::KeyUp,
+                modifiers,
+                key: Some(key_str.into()),
+                code: Some(code_str.into()),
+                windows_virtual_key_code: vk,
+                native_virtual_key_code: vk,
+                ..Default::default()
+            })
+            .await
     }
 
     /// Platform-aware select all (Cmd+A on Mac, Ctrl+A elsewhere)
     pub async fn select_all(&self) -> Result<()> {
-        self.press_key(if cfg!(target_os = "macos") { "Cmd+A" } else { "Ctrl+A" }).await
+        self.press_key(if cfg!(target_os = "macos") {
+            "Cmd+A"
+        } else {
+            "Ctrl+A"
+        })
+        .await
     }
 
     /// Platform-aware copy (Cmd+C on Mac, Ctrl+C elsewhere)
     pub async fn copy(&self) -> Result<()> {
-        self.press_key(if cfg!(target_os = "macos") { "Cmd+C" } else { "Ctrl+C" }).await
+        self.press_key(if cfg!(target_os = "macos") {
+            "Cmd+C"
+        } else {
+            "Ctrl+C"
+        })
+        .await
     }
 
     /// Platform-aware paste (Cmd+V on Mac, Ctrl+V elsewhere)
     pub async fn paste(&self) -> Result<()> {
-        self.press_key(if cfg!(target_os = "macos") { "Cmd+V" } else { "Ctrl+V" }).await
+        self.press_key(if cfg!(target_os = "macos") {
+            "Cmd+V"
+        } else {
+            "Ctrl+V"
+        })
+        .await
     }
 }
 
@@ -1085,26 +1117,64 @@ fn parse_key_combo(combo: &str) -> (i32, &str) {
 
 fn key_to_codes(key: &str) -> (&str, &str, Option<i32>) {
     static KEYS: &[(&str, &str, &str, i32)] = &[
-        ("enter", "Enter", "Enter", 13), ("return", "Enter", "Enter", 13),
-        ("tab", "Tab", "Tab", 9), ("escape", "Escape", "Escape", 27), ("esc", "Escape", "Escape", 27),
-        ("backspace", "Backspace", "Backspace", 8), ("delete", "Delete", "Delete", 46),
-        ("arrowup", "ArrowUp", "ArrowUp", 38), ("up", "ArrowUp", "ArrowUp", 38),
-        ("arrowdown", "ArrowDown", "ArrowDown", 40), ("down", "ArrowDown", "ArrowDown", 40),
-        ("arrowleft", "ArrowLeft", "ArrowLeft", 37), ("left", "ArrowLeft", "ArrowLeft", 37),
-        ("arrowright", "ArrowRight", "ArrowRight", 39), ("right", "ArrowRight", "ArrowRight", 39),
-        ("home", "Home", "Home", 36), ("end", "End", "End", 35),
-        ("pageup", "PageUp", "PageUp", 33), ("pagedown", "PageDown", "PageDown", 34),
+        ("enter", "Enter", "Enter", 13),
+        ("return", "Enter", "Enter", 13),
+        ("tab", "Tab", "Tab", 9),
+        ("escape", "Escape", "Escape", 27),
+        ("esc", "Escape", "Escape", 27),
+        ("backspace", "Backspace", "Backspace", 8),
+        ("delete", "Delete", "Delete", 46),
+        ("arrowup", "ArrowUp", "ArrowUp", 38),
+        ("up", "ArrowUp", "ArrowUp", 38),
+        ("arrowdown", "ArrowDown", "ArrowDown", 40),
+        ("down", "ArrowDown", "ArrowDown", 40),
+        ("arrowleft", "ArrowLeft", "ArrowLeft", 37),
+        ("left", "ArrowLeft", "ArrowLeft", 37),
+        ("arrowright", "ArrowRight", "ArrowRight", 39),
+        ("right", "ArrowRight", "ArrowRight", 39),
+        ("home", "Home", "Home", 36),
+        ("end", "End", "End", 35),
+        ("pageup", "PageUp", "PageUp", 33),
+        ("pagedown", "PageDown", "PageDown", 34),
         ("space", " ", "Space", 32),
-        ("a","a","KeyA",65),("b","b","KeyB",66),("c","c","KeyC",67),("d","d","KeyD",68),
-        ("e","e","KeyE",69),("f","f","KeyF",70),("g","g","KeyG",71),("h","h","KeyH",72),
-        ("i","i","KeyI",73),("j","j","KeyJ",74),("k","k","KeyK",75),("l","l","KeyL",76),
-        ("m","m","KeyM",77),("n","n","KeyN",78),("o","o","KeyO",79),("p","p","KeyP",80),
-        ("q","q","KeyQ",81),("r","r","KeyR",82),("s","s","KeyS",83),("t","t","KeyT",84),
-        ("u","u","KeyU",85),("v","v","KeyV",86),("w","w","KeyW",87),("x","x","KeyX",88),
-        ("y","y","KeyY",89),("z","z","KeyZ",90),
-        ("f1","F1","F1",112),("f2","F2","F2",113),("f3","F3","F3",114),("f4","F4","F4",115),
-        ("f5","F5","F5",116),("f6","F6","F6",117),("f7","F7","F7",118),("f8","F8","F8",119),
-        ("f9","F9","F9",120),("f10","F10","F10",121),("f11","F11","F11",122),("f12","F12","F12",123),
+        ("a", "a", "KeyA", 65),
+        ("b", "b", "KeyB", 66),
+        ("c", "c", "KeyC", 67),
+        ("d", "d", "KeyD", 68),
+        ("e", "e", "KeyE", 69),
+        ("f", "f", "KeyF", 70),
+        ("g", "g", "KeyG", 71),
+        ("h", "h", "KeyH", 72),
+        ("i", "i", "KeyI", 73),
+        ("j", "j", "KeyJ", 74),
+        ("k", "k", "KeyK", 75),
+        ("l", "l", "KeyL", 76),
+        ("m", "m", "KeyM", 77),
+        ("n", "n", "KeyN", 78),
+        ("o", "o", "KeyO", 79),
+        ("p", "p", "KeyP", 80),
+        ("q", "q", "KeyQ", 81),
+        ("r", "r", "KeyR", 82),
+        ("s", "s", "KeyS", 83),
+        ("t", "t", "KeyT", 84),
+        ("u", "u", "KeyU", 85),
+        ("v", "v", "KeyV", 86),
+        ("w", "w", "KeyW", 87),
+        ("x", "x", "KeyX", 88),
+        ("y", "y", "KeyY", 89),
+        ("z", "z", "KeyZ", 90),
+        ("f1", "F1", "F1", 112),
+        ("f2", "F2", "F2", 113),
+        ("f3", "F3", "F3", 114),
+        ("f4", "F4", "F4", 115),
+        ("f5", "F5", "F5", 116),
+        ("f6", "F6", "F6", 117),
+        ("f7", "F7", "F7", 118),
+        ("f8", "F8", "F8", 119),
+        ("f9", "F9", "F9", 120),
+        ("f10", "F10", "F10", 121),
+        ("f11", "F11", "F11", 122),
+        ("f12", "F12", "F12", 123),
     ];
     let lower = key.to_lowercase();
     KEYS.iter()

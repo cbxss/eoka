@@ -463,7 +463,9 @@ async fn test_select_dropdown() {
     .expect("Failed to navigate");
 
     // Select by value
-    page.select("#country", "uk").await.expect("Failed to select");
+    page.select("#country", "uk")
+        .await
+        .expect("Failed to select");
 
     let value: String = page
         .evaluate("document.getElementById('country').value")
@@ -687,9 +689,7 @@ async fn test_select_multiple() {
 
     // Check selected values
     let selected: Vec<String> = page
-        .evaluate(
-            "Array.from(document.getElementById('tags').selectedOptions).map(o => o.value)",
-        )
+        .evaluate("Array.from(document.getElementById('tags').selectedOptions).map(o => o.value)")
         .await
         .expect("Failed to evaluate");
     assert_eq!(selected, vec!["rust", "web"]);

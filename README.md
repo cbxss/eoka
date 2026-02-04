@@ -453,6 +453,15 @@ src/
 
 The key insight: most detection comes from CDP commands leaking (`Runtime.enable` fires `consoleAPICalled` events that pages can detect). We block those at the transport layer and define navigator properties on the prototype instead of the instance.
 
+## Ecosystem
+
+Higher-level tools built on eoka:
+
+| Crate | Description |
+|-------|-------------|
+| [eoka-agent](https://crates.io/crates/eoka-agent) | AI agent layer with MCP server — observe/act loop, annotated screenshots, live element targeting |
+| [eoka-runner](https://crates.io/crates/eoka-runner) | Config-based automation — define flows in YAML, run deterministically |
+
 ## License
 
 MIT

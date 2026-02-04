@@ -1,15 +1,17 @@
 //! # Eoka
 //!
-//! Undetectable browser automation for AI agents.
+//! Stealth browser automation for Rust — a Puppeteer/Playwright alternative that bypasses bot detection.
 //!
-//! Eoka is a minimal, fast stealth browser library built from scratch. It uses a custom
-//! CDP (Chrome DevTools Protocol) implementation with built-in stealth filtering to avoid detection.
+//! Eoka is a minimal, fast headless Chrome library built from scratch. Unlike Selenium or
+//! chromiumoxide, it uses a custom CDP implementation with stealth filtering to avoid detection
+//! by Cloudflare, DataDome, PerimeterX, and other anti-bot systems.
 //!
 //! ## Features
 //!
-//! - **Stealth by Default** - Binary patching, JavaScript evasions, human simulation
-//! - **Minimal Dependencies** - ~10 crates total, no chromiumoxide
-//! - **AI-Agent Optimized** - PageState, element indexing, text extraction
+//! - **Stealth by Default** - Binary patching, 15 JS evasions, human-like mouse/typing
+//! - **Puppeteer-like API** - `click()`, `type()`, `wait_for()`, `screenshot()`, etc.
+//! - **Minimal Dependencies** - ~10 crates total, no chromiumoxide bloat
+//! - **AI-Agent Ready** - PageState introspection, element indexing, text extraction
 //! - **Fast** - Lazy evasion scripts, mmap patching, stack-allocated paths
 //!
 //! ## Quick Start

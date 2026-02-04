@@ -1,11 +1,11 @@
 [package]
 name = "eoka"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 license = "MIT"
-description = "Stealth browser automation"
-keywords = ["browser", "automation", "stealth", "chrome", "scraping"]
-categories = ["web-programming", "development-tools"]
+description = "Stealth browser automation for Rust. Puppeteer/Playwright alternative with anti-bot bypass."
+keywords = ["puppeteer", "playwright", "headless", "selenium", "web-scraping"]
+categories = ["web-programming", "development-tools::testing", "api-bindings"]
 repository = "https://github.com/cbxss/eoka"
 homepage = "https://github.com/cbxss/eoka"
 documentation = "https://docs.rs/eoka"

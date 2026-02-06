@@ -1,6 +1,6 @@
 [package]
 name = "eoka"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 license = "MIT"
 description = "Stealth browser automation for Rust. Puppeteer/Playwright alternative with anti-bot bypass."

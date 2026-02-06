@@ -172,11 +172,7 @@ fn resolve_to_elf(path: &Path) -> PathBuf {
     for lib_path in &lib_candidates {
         let p = Path::new(lib_path);
         if p.exists() && is_elf(p) {
-            tracing::info!(
-                "Resolved wrapper script {:?} to ELF binary {:?}",
-                path,
-                p
-            );
+            tracing::info!("Resolved wrapper script {:?} to ELF binary {:?}", path, p);
             return p.to_path_buf();
         }
     }
@@ -401,11 +397,7 @@ impl ChromePatcher {
             let entries = match fs::read_dir(orig_dir) {
                 Ok(e) => e,
                 Err(err) => {
-                    tracing::warn!(
-                        "Could not read Chrome directory {:?}: {}",
-                        orig_dir,
-                        err
-                    );
+                    tracing::warn!("Could not read Chrome directory {:?}: {}", orig_dir, err);
                     return;
                 }
             };

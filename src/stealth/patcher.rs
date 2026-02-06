@@ -121,11 +121,84 @@ pub fn find_chrome() -> Result<PathBuf> {
     for candidate in candidates {
         let path = Path::new(candidate);
         if path.exists() {
+            #[cfg(target_os = "linux")]
+            {
+                let resolved = resolve_to_elf(path);
+                return Ok(resolved);
+            }
+            #[cfg(not(target_os = "linux"))]
             return Ok(path.to_path_buf());
         }
     }
 
     Err(Error::ChromeNotFound)
+}
+
+/// On Linux, `/usr/bin/chromium-browser` (and similar) are often shell script
+/// wrappers, not actual ELF binaries. The patcher needs the real binary so it
+/// can rewrite detection markers. This function checks the magic bytes and, if
+/// the candidate is not an ELF, looks for the real binary in the standard lib
+/// directories where distros place it.
+#[cfg(target_os = "linux")]
+fn resolve_to_elf(path: &Path) -> PathBuf {
+    if is_elf(path) {
+        return path.to_path_buf();
+    }
+
+    // Follow symlinks first — google-chrome might be a symlink to the real thing
+    if let Ok(resolved) = fs::canonicalize(path) {
+        if is_elf(&resolved) {
+            tracing::info!("Resolved symlink {:?} to ELF binary {:?}", path, resolved);
+            return resolved;
+        }
+    }
+
+    // Derive the binary name from the candidate (e.g. "chromium-browser")
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("chromium-browser");
+
+    // Standard lib directories where distros keep the actual ELF
+    let lib_candidates = [
+        format!("/usr/lib/{0}/{0}", name),
+        format!("/usr/lib64/{0}/{0}", name),
+        "/usr/lib/chromium-browser/chromium-browser".to_string(),
+        "/usr/lib/chromium/chromium".to_string(),
+        "/opt/google/chrome/chrome".to_string(),
+        "/opt/google/chrome/google-chrome".to_string(),
+    ];
+
+    for lib_path in &lib_candidates {
+        let p = Path::new(lib_path);
+        if p.exists() && is_elf(p) {
+            tracing::info!(
+                "Resolved wrapper script {:?} to ELF binary {:?}",
+                path,
+                p
+            );
+            return p.to_path_buf();
+        }
+    }
+
+    // Fallback: return as-is and let the patcher fail with a clear error
+    tracing::warn!(
+        "Chrome candidate {:?} is not an ELF binary and no lib binary was found",
+        path,
+    );
+    path.to_path_buf()
+}
+
+/// Check if a file starts with the ELF magic bytes (0x7f ELF).
+#[cfg(target_os = "linux")]
+fn is_elf(path: &Path) -> bool {
+    File::open(path)
+        .and_then(|mut f| {
+            let mut magic = [0u8; 4];
+            f.read_exact(&mut magic)?;
+            Ok(magic == [0x7f, b'E', b'L', b'F'])
+        })
+        .unwrap_or(false)
 }
 
 /// Chrome binary patcher
@@ -298,6 +371,72 @@ impl ChromePatcher {
         Ok(())
     }
 
+    /// Symlink all sibling files from the original binary's directory into the
+    /// patched directory. On Linux, Chromium uses `$ORIGIN` RPATH so it resolves
+    /// shared libraries (libffmpeg.so, etc.) and data files (icudtl.dat, v8
+    /// snapshots, locale paks) relative to the binary. Without these symlinks
+    /// the patched copy in /tmp cannot find its resources and crashes.
+    #[cfg(not(target_os = "macos"))]
+    fn symlink_companion_files(&self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let orig_dir = match self.original_path.parent() {
+                Some(d) => d,
+                None => return,
+            };
+            let patch_dir = match self.patched_path.parent() {
+                Some(d) => d,
+                None => return,
+            };
+
+            // Nothing to do if source and destination are the same directory
+            if orig_dir == patch_dir {
+                return;
+            }
+
+            let orig_filename = self.original_path.file_name();
+
+            let entries = match fs::read_dir(orig_dir) {
+                Ok(e) => e,
+                Err(err) => {
+                    tracing::warn!(
+                        "Could not read Chrome directory {:?}: {}",
+                        orig_dir,
+                        err
+                    );
+                    return;
+                }
+            };
+
+            for entry in entries.flatten() {
+                // Skip the binary itself — we're patching that
+                if Some(entry.file_name().as_os_str()) == orig_filename {
+                    continue;
+                }
+
+                let dest = patch_dir.join(entry.file_name());
+                if !dest.exists() {
+                    if let Err(err) = symlink(entry.path(), &dest) {
+                        tracing::trace!(
+                            "Could not symlink {:?} -> {:?}: {}",
+                            entry.path(),
+                            dest,
+                            err
+                        );
+                    }
+                }
+            }
+
+            tracing::debug!(
+                "Symlinked companion files from {:?} into {:?}",
+                orig_dir,
+                patch_dir
+            );
+        }
+    }
+
     /// Get path to patched binary (patches if needed)
     pub fn get_patched_path(&self) -> Result<PathBuf> {
         if !self.is_patched() {
@@ -316,8 +455,15 @@ impl ChromePatcher {
         }
 
         #[cfg(not(target_os = "macos"))]
-        if let Some(parent) = self.patched_path.parent() {
-            fs::create_dir_all(parent)?;
+        {
+            if let Some(parent) = self.patched_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            // Symlink companion files (.so, .pak, .dat, .bin, locales, etc.)
+            // so the patched binary can find its resources. Chromium uses
+            // $ORIGIN RPATH, meaning it resolves libraries relative to the
+            // binary — without these symlinks the patched copy crashes.
+            self.symlink_companion_files();
         }
 
         #[cfg(target_os = "macos")]
@@ -533,6 +679,32 @@ mod tests {
             println!("Found Chrome at: {:?}", path);
             assert!(path.exists());
         }
+    }
+
+    /// Verify that find_chrome returns an ELF binary, not a shell wrapper.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_find_chrome_returns_elf() {
+        if let Ok(path) = find_chrome() {
+            assert!(
+                is_elf(&path),
+                "find_chrome() returned {:?} which is not an ELF binary",
+                path,
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_is_elf() {
+        // /usr/bin/ls should be an ELF binary on any Linux
+        let ls = Path::new("/usr/bin/ls");
+        if ls.exists() {
+            assert!(is_elf(ls), "/usr/bin/ls should be ELF");
+        }
+
+        // A non-existent path is not ELF
+        assert!(!is_elf(Path::new("/nonexistent")));
     }
 
     #[test]

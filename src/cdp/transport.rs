@@ -350,11 +350,14 @@ impl Transport {
                             .and_then(|s| s.as_str())
                             .map(String::from);
 
-                        if event_tx.try_send(CdpMessage::Event {
-                            method: method.to_string(),
-                            params,
-                            session_id,
-                        }).is_err() {
+                        if event_tx
+                            .try_send(CdpMessage::Event {
+                                method: method.to_string(),
+                                params,
+                                session_id,
+                            })
+                            .is_err()
+                        {
                             // Channel full or closed — drop event to avoid blocking reader
                             tracing::trace!("Event channel full, dropping: {}", method);
                         }
@@ -446,7 +449,10 @@ impl Transport {
                 // Remove the pending request so the reader doesn't try to send to a dropped channel
                 let mut pending = self.pending.lock().unwrap();
                 pending.remove(&id);
-                eprintln!("[eoka] CDP command '{}' timed out after 10s (id={})", method, id);
+                eprintln!(
+                    "[eoka] CDP command '{}' timed out after 10s (id={})",
+                    method, id
+                );
                 Error::transport(format!(
                     "CDP command '{}' timed out after 10s (id={})",
                     method, id

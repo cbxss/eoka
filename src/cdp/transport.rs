@@ -241,10 +241,14 @@ impl Transport {
 
         tracing::debug!("WebSocket connected to {}", ws_url);
 
-        // Clone stream for reader
+        // Clone stream for reader with a read timeout so it doesn't block
+        // indefinitely when Chrome freezes (OOM, CPU starvation, etc.)
         let reader_stream = stream
             .try_clone()
             .map_err(|e| Error::transport_io("Failed to clone stream", e))?;
+        reader_stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+            .map_err(|e| Error::transport_io("Failed to set read timeout", e))?;
 
         let pending: Arc<PendingMap> = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -270,11 +274,33 @@ impl Transport {
         pending: Arc<PendingMap>,
         event_tx: mpsc::Sender<CdpMessage>,
     ) {
+        let exit_reason;
+
         loop {
             let (opcode, payload) = match read_ws_frame(&mut stream) {
                 Ok(frame) => frame,
                 Err(e) => {
-                    tracing::debug!("WebSocket read error: {}", e);
+                    // Distinguish read timeout (expected, retry) from real errors
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut
+                    {
+                        // Read timeout fired — connection may still be alive.
+                        // Check if there are any pending requests; if so, this is
+                        // suspicious (Chrome should have responded by now).
+                        let n_pending = pending.lock().unwrap().len();
+                        if n_pending > 0 {
+                            tracing::warn!(
+                                "WebSocket read timeout with {} pending request(s)",
+                                n_pending
+                            );
+                        }
+                        // Keep looping — the per-command 10s timeout handles
+                        // individual staleness; the read timeout just prevents
+                        // this thread from blocking forever.
+                        continue;
+                    }
+                    exit_reason = format!("WebSocket read error: {}", e);
+                    tracing::debug!("{}", exit_reason);
                     break;
                 }
             };
@@ -324,11 +350,14 @@ impl Transport {
                             .and_then(|s| s.as_str())
                             .map(String::from);
 
-                        let _ = event_tx.blocking_send(CdpMessage::Event {
+                        if event_tx.try_send(CdpMessage::Event {
                             method: method.to_string(),
                             params,
                             session_id,
-                        });
+                        }).is_err() {
+                            // Channel full or closed — drop event to avoid blocking reader
+                            tracing::trace!("Event channel full, dropping: {}", method);
+                        }
                     }
                 }
                 ws::OPCODE_PING => {
@@ -337,14 +366,31 @@ impl Transport {
                     let _ = std::io::Write::write_all(&mut stream, &frame);
                 }
                 ws::OPCODE_CLOSE => {
-                    tracing::debug!("WebSocket closed by server");
+                    exit_reason = "WebSocket closed by server".to_string();
+                    tracing::debug!("{}", exit_reason);
                     break;
                 }
                 _ => {}
             }
         }
 
-        tracing::debug!("CDP reader loop ended");
+        // Drain all pending requests so callers fail immediately instead of
+        // hanging until the per-command timeout fires.
+        let mut pending_guard = pending.lock().unwrap();
+        let n = pending_guard.len();
+        if n > 0 {
+            eprintln!(
+                "[eoka] reader loop exiting ({}), failing {} pending request(s)",
+                exit_reason, n
+            );
+            for (_id, sender) in pending_guard.drain() {
+                let _ = sender.send(Err(Error::transport(format!(
+                    "WebSocket connection lost: {}",
+                    exit_reason
+                ))));
+            }
+        }
+        tracing::debug!("CDP reader loop ended ({})", exit_reason);
     }
 
     /// Internal: send a CDP command with optional session ID
@@ -393,9 +439,19 @@ impl Transport {
 
         tracing::trace!("Sent CDP command: {} (id={})", method, id);
 
-        // Wait for response
-        let result = rx
+        // Wait for response with timeout to prevent deadlock if reader dies
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
             .await
+            .map_err(|_| {
+                // Remove the pending request so the reader doesn't try to send to a dropped channel
+                let mut pending = self.pending.lock().unwrap();
+                pending.remove(&id);
+                eprintln!("[eoka] CDP command '{}' timed out after 10s (id={})", method, id);
+                Error::transport(format!(
+                    "CDP command '{}' timed out after 10s (id={})",
+                    method, id
+                ))
+            })?
             .map_err(|_| Error::transport("Response channel closed"))??;
 
         let response: R = serde_json::from_value(result)?;

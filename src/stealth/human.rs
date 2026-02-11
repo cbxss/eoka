@@ -3,7 +3,7 @@
 //! Simulates realistic mouse movements and typing patterns to avoid
 //! behavior-based bot detection.
 
-use rand::Rng;
+use rand::RngExt;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::time::Duration;

@@ -5,7 +5,7 @@
 
 use aho_corasick::{AhoCorasick, Match};
 use memmap2::MmapMut;
-use rand::Rng;
+use rand::RngExt;
 use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};

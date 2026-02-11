@@ -3,7 +3,7 @@
 //! Generates realistic, randomized browser fingerprints.
 
 use rand::prelude::IndexedRandom;
-use rand::Rng;
+use rand::RngExt;
 
 /// Chrome versions (recent, realistic)
 const CHROME_VERSIONS: &[&str] = &[

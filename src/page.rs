@@ -114,7 +114,8 @@ impl Page {
 
     /// Get page HTML content
     pub async fn content(&self) -> Result<String> {
-        self.evaluate_sync("document.documentElement.outerHTML").await
+        self.evaluate_sync("document.documentElement.outerHTML")
+            .await
     }
 
     /// Get page text content (body innerText)

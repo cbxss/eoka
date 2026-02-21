@@ -414,9 +414,7 @@ impl Transport {
                                         response["sessionId"] = json!(sid);
                                     }
                                     if let Ok(data) = serde_json::to_string(&response) {
-                                        if let Err(e) =
-                                            write_ws_frame(writer, data.as_bytes())
-                                        {
+                                        if let Err(e) = write_ws_frame(writer, data.as_bytes()) {
                                             tracing::warn!(
                                                 "Failed to send proxy auth response: {}",
                                                 e
@@ -533,11 +531,15 @@ impl Transport {
                 pending.remove(&id);
                 tracing::warn!(
                     "CDP command '{}' timed out after {}s (id={})",
-                    method, self.cmd_timeout.as_secs(), id
+                    method,
+                    self.cmd_timeout.as_secs(),
+                    id
                 );
                 Error::transport(format!(
                     "CDP command '{}' timed out after {}s (id={})",
-                    method, self.cmd_timeout.as_secs(), id
+                    method,
+                    self.cmd_timeout.as_secs(),
+                    id
                 ))
             })?
             .map_err(|_| Error::transport("Response channel closed"))??;

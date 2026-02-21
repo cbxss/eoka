@@ -136,8 +136,13 @@ impl Browser {
         tracing::info!("Launching Chrome from {:?}", chrome_path);
         let (child, ws_url) = launch_chrome(&chrome_path, &args)?;
 
-        // Create transport and connection
-        let transport = Transport::new(child, &ws_url)?;
+        // Create transport — with proxy auth and configurable timeout
+        let proxy_auth = match (&config.proxy_username, &config.proxy_password) {
+            (Some(u), Some(p)) => Some((u.clone(), p.clone())),
+            _ => None,
+        };
+        let transport =
+            Transport::new_with_options(child, &ws_url, proxy_auth, config.cdp_timeout)?;
         let connection = Connection::new(transport);
 
         // Get browser version
@@ -169,6 +174,11 @@ impl Browser {
         // Enable page events
         session.page_enable().await?;
 
+        // Enable Fetch domain for proxy auth if credentials are configured
+        if self.config.proxy_username.is_some() && self.config.proxy_password.is_some() {
+            session.fetch_enable(true).await?;
+        }
+
         // Inject evasion scripts BEFORE navigation
         session
             .add_script_to_evaluate_on_new_document(&self.evasion_script)
@@ -197,6 +207,11 @@ impl Browser {
 
         let session = self.connection.attach_to_target(&target_id).await?;
         session.page_enable().await?;
+
+        if self.config.proxy_username.is_some() && self.config.proxy_password.is_some() {
+            session.fetch_enable(true).await?;
+        }
+
         session
             .add_script_to_evaluate_on_new_document(&self.evasion_script)
             .await?;
@@ -222,6 +237,23 @@ impl Browser {
                 url: t.url,
             })
             .collect())
+    }
+
+    /// Attach to an existing browser target (e.g., a popup opened by window.open()).
+    /// Use `tabs()` to discover popup target IDs, then call this to get a Page handle.
+    pub async fn attach_page(&self, target_id: &str) -> Result<Page> {
+        let session = self.connection.attach_to_target(target_id).await?;
+        session.page_enable().await?;
+
+        if self.config.proxy_username.is_some() && self.config.proxy_password.is_some() {
+            session.fetch_enable(true).await?;
+        }
+
+        session
+            .add_script_to_evaluate_on_new_document(&self.evasion_script)
+            .await?;
+
+        Ok(Page::new(session, Arc::clone(&self.config)))
     }
 
     /// Activate (focus) a tab by target ID

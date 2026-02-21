@@ -117,8 +117,14 @@ pub struct StealthConfig {
     pub debug: bool,
     /// Directory for debug screenshots (defaults to current directory)
     pub debug_dir: Option<String>,
-    /// Proxy server URL (e.g. "http://127.0.0.1:8080" or "socks5://user:pass@host:port")
+    /// Proxy server URL (e.g. "http://host:port")
     pub proxy: Option<String>,
+    /// Proxy username for authenticated proxies
+    pub proxy_username: Option<String>,
+    /// Proxy password for authenticated proxies
+    pub proxy_password: Option<String>,
+    /// CDP command timeout in seconds (default: 30, increase for slow proxies)
+    pub cdp_timeout: u64,
 }
 
 impl Default for StealthConfig {
@@ -138,6 +144,9 @@ impl Default for StealthConfig {
             debug: false,
             debug_dir: None,
             proxy: None,
+            proxy_username: None,
+            proxy_password: None,
+            cdp_timeout: 30,
         }
     }
 }
@@ -160,6 +169,9 @@ impl StealthConfig {
             debug: false,
             debug_dir: None,
             proxy: None,
+            proxy_username: None,
+            proxy_password: None,
+            cdp_timeout: 30,
         }
     }
 

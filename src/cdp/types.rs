@@ -92,6 +92,9 @@ pub struct PageNavigateResult {
     pub loader_id: Option<String>,
     #[serde(default)]
     pub error_text: Option<String>,
+    /// HTTP status code of the final response (e.g. 200, 404). Not set for non-HTTP schemes.
+    #[serde(default)]
+    pub http_status_code: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -717,4 +720,13 @@ pub struct TargetTargetCreatedEvent {
 #[serde(rename_all = "camelCase")]
 pub struct TargetTargetDestroyedEvent {
     pub target_id: String,
+}
+
+// === Fetch domain (proxy authentication) ===
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchEnable {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle_auth_requests: Option<bool>,
 }

@@ -157,6 +157,8 @@ pub struct Transport {
     pending: Arc<PendingMap>,
     /// Channel to receive parsed messages from the reader task
     event_rx: Mutex<mpsc::Receiver<CdpMessage>>,
+    /// Timeout for CDP commands
+    cmd_timeout: std::time::Duration,
 }
 
 /// A parsed CDP message (response or event)
@@ -176,6 +178,27 @@ pub enum CdpMessage {
 impl Transport {
     /// Create a new transport connecting to Chrome via WebSocket
     pub fn new(child: Child, ws_url: &str) -> Result<Self> {
+        Self::new_with_options(child, ws_url, None, 30)
+    }
+
+    /// Create a new transport with optional proxy authentication credentials.
+    /// When provided, the reader loop will automatically respond to
+    /// `Fetch.authRequired` events with the given username/password.
+    pub fn new_with_proxy_auth(
+        child: Child,
+        ws_url: &str,
+        proxy_auth: Option<(String, String)>,
+    ) -> Result<Self> {
+        Self::new_with_options(child, ws_url, proxy_auth, 30)
+    }
+
+    /// Create a new transport with proxy auth and configurable CDP timeout.
+    pub fn new_with_options(
+        child: Child,
+        ws_url: &str,
+        proxy_auth: Option<(String, String)>,
+        cdp_timeout_secs: u64,
+    ) -> Result<Self> {
         // Parse WebSocket URL
         let url = ws_url.trim_start_matches("ws://");
         let (host_port, _path) = url.split_once('/').unwrap_or((url, ""));
@@ -241,14 +264,29 @@ impl Transport {
 
         tracing::debug!("WebSocket connected to {}", ws_url);
 
-        // Clone stream for reader with a read timeout so it doesn't block
-        // indefinitely when Chrome freezes (OOM, CPU starvation, etc.)
+        let cmd_timeout = std::time::Duration::from_secs(cdp_timeout_secs);
+        tracing::debug!("CDP timeout set to {}s", cdp_timeout_secs);
+
+        // Clone stream for reader — set TCP read timeout as safety net
+        // so the reader thread doesn't block forever if Chrome hangs
         let reader_stream = stream
             .try_clone()
             .map_err(|e| Error::transport_io("Failed to clone stream", e))?;
         reader_stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+            .set_read_timeout(Some(std::time::Duration::from_secs(cdp_timeout_secs * 4)))
             .map_err(|e| Error::transport_io("Failed to set read timeout", e))?;
+
+        // If proxy auth is configured, clone writer for the reader loop to send
+        // Fetch.continueWithAuth responses directly
+        let proxy_auth_writer = match proxy_auth {
+            Some((username, password)) => {
+                let auth_writer = stream
+                    .try_clone()
+                    .map_err(|e| Error::transport_io("Failed to clone auth writer", e))?;
+                Some((username, password, auth_writer))
+            }
+            None => None,
+        };
 
         let pending: Arc<PendingMap> = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -256,7 +294,7 @@ impl Transport {
         // Spawn reader task
         let pending_clone = Arc::clone(&pending);
         std::thread::spawn(move || {
-            Self::reader_loop(reader_stream, pending_clone, event_tx);
+            Self::reader_loop(reader_stream, pending_clone, event_tx, proxy_auth_writer);
         });
 
         Ok(Self {
@@ -265,28 +303,33 @@ impl Transport {
             next_id: AtomicU64::new(1),
             pending,
             event_rx: Mutex::new(event_rx),
+            cmd_timeout,
         })
     }
 
-    /// Reader loop - runs in a separate thread to read from WebSocket
+    /// Reader loop - runs in a separate thread to read from WebSocket.
+    /// If `proxy_auth` is provided, `Fetch.authRequired` events are automatically
+    /// answered with `Fetch.continueWithAuth` using the given credentials.
     fn reader_loop(
         mut stream: TcpStream,
         pending: Arc<PendingMap>,
         event_tx: mpsc::Sender<CdpMessage>,
+        mut proxy_auth: Option<(String, String, TcpStream)>,
     ) {
         let exit_reason;
+        // Separate command ID space for auth responses (won't collide with main IDs)
+        let mut auth_cmd_id: u64 = u64::MAX / 2;
 
         loop {
             let (opcode, payload) = match read_ws_frame(&mut stream) {
                 Ok(frame) => frame,
                 Err(e) => {
-                    // Distinguish read timeout (expected, retry) from real errors
+                    // Read timeout fired — connection may still be alive.
+                    // Check if there are any pending requests; if so, this is
+                    // suspicious (Chrome should have responded by now).
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut
                     {
-                        // Read timeout fired — connection may still be alive.
-                        // Check if there are any pending requests; if so, this is
-                        // suspicious (Chrome should have responded by now).
                         let n_pending = pending.lock().unwrap().len();
                         if n_pending > 0 {
                             tracing::warn!(
@@ -294,9 +337,6 @@ impl Transport {
                                 n_pending
                             );
                         }
-                        // Keep looping — the per-command 10s timeout handles
-                        // individual staleness; the read timeout just prevents
-                        // this thread from blocking forever.
                         continue;
                     }
                     exit_reason = format!("WebSocket read error: {}", e);
@@ -349,6 +389,48 @@ impl Transport {
                             .get("sessionId")
                             .and_then(|s| s.as_str())
                             .map(String::from);
+
+                        // Auto-handle proxy auth challenges
+                        if method == "Fetch.authRequired" {
+                            if let Some((ref username, ref password, ref mut writer)) = proxy_auth {
+                                if let Some(request_id) =
+                                    params.get("requestId").and_then(|v| v.as_str())
+                                {
+                                    auth_cmd_id += 1;
+                                    let mut response = json!({
+                                        "id": auth_cmd_id,
+                                        "method": "Fetch.continueWithAuth",
+                                        "params": {
+                                            "requestId": request_id,
+                                            "authChallengeResponse": {
+                                                "response": "ProvideCredentials",
+                                                "username": username,
+                                                "password": password
+                                            }
+                                        }
+                                    });
+                                    // Include sessionId if present
+                                    if let Some(ref sid) = session_id {
+                                        response["sessionId"] = json!(sid);
+                                    }
+                                    if let Ok(data) = serde_json::to_string(&response) {
+                                        if let Err(e) =
+                                            write_ws_frame(writer, data.as_bytes())
+                                        {
+                                            tracing::warn!(
+                                                "Failed to send proxy auth response: {}",
+                                                e
+                                            );
+                                        } else {
+                                            tracing::debug!(
+                                                "Auto-responded to proxy auth challenge"
+                                            );
+                                        }
+                                    }
+                                    continue; // Don't forward to event channel
+                                }
+                            }
+                        }
 
                         if event_tx
                             .try_send(CdpMessage::Event {
@@ -443,19 +525,19 @@ impl Transport {
         tracing::trace!("Sent CDP command: {} (id={})", method, id);
 
         // Wait for response with timeout to prevent deadlock if reader dies
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+        let result = tokio::time::timeout(self.cmd_timeout, rx)
             .await
             .map_err(|_| {
                 // Remove the pending request so the reader doesn't try to send to a dropped channel
                 let mut pending = self.pending.lock().unwrap();
                 pending.remove(&id);
-                eprintln!(
-                    "[eoka] CDP command '{}' timed out after 10s (id={})",
-                    method, id
+                tracing::warn!(
+                    "CDP command '{}' timed out after {}s (id={})",
+                    method, self.cmd_timeout.as_secs(), id
                 );
                 Error::transport(format!(
-                    "CDP command '{}' timed out after 10s (id={})",
-                    method, id
+                    "CDP command '{}' timed out after {}s (id={})",
+                    method, self.cmd_timeout.as_secs(), id
                 ))
             })?
             .map_err(|_| Error::transport("Response channel closed"))??;
@@ -539,35 +621,36 @@ pub fn launch_chrome(path: &std::path::Path, args: &[String]) -> Result<(Child, 
         .spawn()
         .map_err(|e| Error::Launch(format!("Failed to launch Chrome: {}", e)))?;
 
-    // Read stderr to find the DevTools URL
+    // Read stderr to find the DevTools URL (with 30s timeout)
     let stderr = child
         .stderr
         .take()
         .ok_or(Error::Launch("No stderr from Chrome".into()))?;
 
-    let reader = BufReader::new(stderr);
-    let mut ws_url = None;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        // Chrome prints: DevTools listening on ws://127.0.0.1:PORT/devtools/browser/GUID
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
 
-    // Chrome prints: DevTools listening on ws://127.0.0.1:PORT/devtools/browser/GUID
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
+            tracing::trace!("Chrome stderr: {}", line);
 
-        tracing::trace!("Chrome stderr: {}", line);
-
-        if line.contains("DevTools listening on") {
-            if let Some(url_start) = line.find("ws://") {
-                ws_url = Some(line[url_start..].trim().to_string());
-                break;
+            if line.contains("DevTools listening on") {
+                if let Some(url_start) = line.find("ws://") {
+                    let _ = tx.send(line[url_start..].trim().to_string());
+                    return;
+                }
             }
         }
-    }
+    });
 
-    let ws_url = ws_url.ok_or(Error::Launch(
-        "Failed to get DevTools WebSocket URL from Chrome".into(),
-    ))?;
+    let ws_url = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .map_err(|_| Error::Launch("Timed out waiting for Chrome DevTools URL (30s)".into()))?;
 
     tracing::info!("Chrome DevTools URL: {}", ws_url);
 

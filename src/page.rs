@@ -74,7 +74,11 @@ impl Page {
     pub async fn goto(&self, url: &str) -> Result<()> {
         let result = self.session.navigate(url).await?;
         if let Some(error) = result.error_text {
-            return Err(Error::Navigation(error));
+            // ERR_HTTP_RESPONSE_CODE_FAILURE means the server returned 4xx/5xx but the
+            // page still loaded — Chrome renders it normally, so don't treat it as fatal.
+            if error != "net::ERR_HTTP_RESPONSE_CODE_FAILURE" {
+                return Err(Error::Navigation(error));
+            }
         }
         // Brief settle time for navigation to start. Use wait_for_navigation()
         // for reliable completion detection.
@@ -104,17 +108,18 @@ impl Page {
 
     /// Get page title
     pub async fn title(&self) -> Result<String> {
-        self.evaluate("document.title || ''").await
+        // Use evaluate_sync (awaitPromise=false) so heavy SPAs don't block
+        self.evaluate_sync("document.title || ''").await
     }
 
     /// Get page HTML content
     pub async fn content(&self) -> Result<String> {
-        self.evaluate("document.documentElement.outerHTML").await
+        self.evaluate_sync("document.documentElement.outerHTML").await
     }
 
     /// Get page text content (body innerText)
     pub async fn text(&self) -> Result<String> {
-        self.evaluate("document.body?.innerText || ''").await
+        self.evaluate_sync("document.body?.innerText || ''").await
     }
     /// Capture a screenshot as PNG bytes
     pub async fn screenshot(&self) -> Result<Vec<u8>> {
@@ -815,14 +820,18 @@ impl Page {
             })()
         "#;
 
-        // Install the interceptors
-        let _: i32 = self.evaluate(check_idle_js).await.unwrap_or(0);
+        // Install the interceptors (use evaluate_sync to avoid blocking on busy JS thread)
+        let _: i32 = self.evaluate_sync(check_idle_js).await.unwrap_or(0);
 
         let mut idle_start: Option<std::time::Instant> = None;
 
         loop {
+            // Use evaluate_sync (await_promise=false) so Chrome returns immediately
+            // instead of waiting for the JS thread to drain its microtask queue.
+            // On heavy SPAs (React/Next.js hydration), evaluate() with await_promise=true
+            // blocks until the JS thread is free, which can be many seconds.
             let pending: i32 = self
-                .evaluate("window.__eoka_pending_requests || 0")
+                .evaluate_sync("window.__eoka_pending_requests || 0")
                 .await
                 .unwrap_or(0);
 
@@ -841,10 +850,9 @@ impl Page {
             }
 
             if start.elapsed() > timeout {
-                return Err(Error::Timeout(format!(
-                    "Network did not become idle within {}ms (pending: {})",
-                    timeout_ms, pending
-                )));
+                // Return Ok on timeout — heavy SPAs (React apps with polling/analytics)
+                // never go fully network-idle. The page is still usable.
+                return Ok(());
             }
 
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;

@@ -149,6 +149,19 @@ impl Session {
             .await
     }
 
+    /// Enable the Fetch domain to handle auth challenges (for proxy auth).
+    /// Must be called per-session (per-tab).
+    pub async fn fetch_enable(&self, handle_auth_requests: bool) -> Result<()> {
+        self.send::<_, serde_json::Value>(
+            "Fetch.enable",
+            &FetchEnable {
+                handle_auth_requests: Some(handle_auth_requests),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Enable page events
     pub async fn page_enable(&self) -> Result<()> {
         self.send::<_, serde_json::Value>("Page.enable", &PageEnable {})

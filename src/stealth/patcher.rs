@@ -86,11 +86,17 @@ static PATCH_PATTERNS: &[PatchPattern] = &[
 /// Compiled pattern matcher (lazy initialized)
 static PATTERN_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
 
-fn get_pattern_matcher() -> &'static AhoCorasick {
-    PATTERN_MATCHER.get_or_init(|| {
-        let patterns: Vec<&[u8]> = PATCH_PATTERNS.iter().map(|p| p.pattern).collect();
-        AhoCorasick::new(&patterns).expect("Failed to build Aho-Corasick automaton")
-    })
+fn get_pattern_matcher() -> Result<&'static AhoCorasick> {
+    // OnceLock doesn't support fallible init, so we handle it via a separate error check.
+    // The patterns are static &[u8] literals — this will only fail on a bug in aho-corasick.
+    if let Some(ac) = PATTERN_MATCHER.get() {
+        return Ok(ac);
+    }
+    let patterns: Vec<&[u8]> = PATCH_PATTERNS.iter().map(|p| p.pattern).collect();
+    let ac = AhoCorasick::new(&patterns).map_err(|e| {
+        Error::patching("init", format!("Failed to build Aho-Corasick automaton: {}", e))
+    })?;
+    Ok(PATTERN_MATCHER.get_or_init(|| ac))
 }
 
 /// Find Chrome binary on the system
@@ -235,7 +241,9 @@ impl ChromePatcher {
                     .file_name()
                     .ok_or_else(|| Error::patching("new", "Invalid bundle path"))?;
 
-                let patched_bundle = std::env::temp_dir().join("eoka-chrome").join(bundle_name);
+                let patched_bundle = std::env::temp_dir()
+                    .join(format!("eoka-chrome-{}", std::process::id()))
+                    .join(bundle_name);
 
                 let relative_path = chrome_path
                     .strip_prefix(&bundle)
@@ -256,7 +264,9 @@ impl ChromePatcher {
             .file_name()
             .ok_or_else(|| Error::patching("new", "Invalid path"))?;
 
-        let patched_path = std::env::temp_dir().join("eoka-chrome").join(filename);
+        let patched_path = std::env::temp_dir()
+            .join(format!("eoka-chrome-{}", std::process::id()))
+            .join(filename);
 
         Ok(Self {
             original_path: chrome_path.to_path_buf(),
@@ -303,7 +313,10 @@ impl ChromePatcher {
         };
         buffer.truncate(bytes_read);
 
-        !get_pattern_matcher().is_match(&buffer)
+        match get_pattern_matcher() {
+            Ok(ac) => !ac.is_match(&buffer),
+            Err(_) => false,
+        }
     }
 
     /// Copy the app bundle (macOS) using symlinks for speed
@@ -522,7 +535,7 @@ impl ChromePatcher {
         // SAFETY: We just created/copied this file and hold it open exclusively.
         // No other process is writing to it concurrently.
         let mut mmap = unsafe { MmapMut::map_mut(&file)? };
-        let patch_count = self.apply_patches(&mut mmap);
+        let patch_count = self.apply_patches(&mut mmap)?;
 
         mmap.flush()?;
         Ok(patch_count)
@@ -534,7 +547,7 @@ impl ChromePatcher {
         file.read_to_end(&mut data)?;
 
         let original_len = data.len();
-        let patch_count = self.apply_patches(&mut data);
+        let patch_count = self.apply_patches(&mut data)?;
 
         if data.len() != original_len {
             return Err(Error::patching(
@@ -558,8 +571,8 @@ impl ChromePatcher {
         Ok(patch_count)
     }
 
-    fn apply_patches(&self, data: &mut [u8]) -> usize {
-        let matches: Vec<Match> = get_pattern_matcher().find_iter(&*data).collect();
+    fn apply_patches(&self, data: &mut [u8]) -> Result<usize> {
+        let matches: Vec<Match> = get_pattern_matcher()?.find_iter(&*data).collect();
         let mut patch_count = 0;
         let mut patched_ranges: Vec<(usize, usize)> = Vec::new();
 
@@ -611,7 +624,7 @@ impl ChromePatcher {
             tracing::debug!("Applied {} patches using Aho-Corasick", patch_count);
         }
 
-        patch_count
+        Ok(patch_count)
     }
 
     #[cfg(target_os = "macos")]
@@ -709,7 +722,8 @@ mod tests {
     #[test]
     fn test_aho_corasick_patterns() {
         let test_data = b"$cdc_test webdriver HeadlessChrome";
-        let matches: Vec<_> = get_pattern_matcher().find_iter(test_data).collect();
+        let ac = get_pattern_matcher().expect("pattern matcher should build");
+        let matches: Vec<_> = ac.find_iter(test_data).collect();
         assert!(matches.len() >= 3);
     }
 }

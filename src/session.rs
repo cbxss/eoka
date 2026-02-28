@@ -80,19 +80,33 @@ impl BrowserSession {
         Ok(session)
     }
 
-    /// Get cookies for a specific domain
+    /// Get cookies for a specific domain (RFC 6265 domain matching)
     pub fn cookies_for_domain(&self, domain: &str) -> Vec<&SessionCookie> {
         self.cookies
             .iter()
-            .filter(|c| domain.ends_with(&c.domain) || c.domain.ends_with(domain))
+            .filter(|c| {
+                let cookie_domain = c.domain.trim_start_matches('.');
+                // Exact match or subdomain match with dot boundary
+                domain == cookie_domain
+                    || domain.ends_with(&format!(".{}", cookie_domain))
+            })
             .collect()
     }
 
-    /// Format cookies as a Cookie header value
+    /// Format cookies as a Cookie header value (RFC 6265 compliant)
     pub fn cookie_header(&self) -> String {
         self.cookies
             .iter()
-            .map(|c| format!("{}={}", c.name, c.value))
+            .map(|c| {
+                // RFC 6265 §4.1.1: cookie-value must not contain semicolons,
+                // commas, or whitespace. Percent-encode problematic chars.
+                let safe_value = c.value
+                    .replace('%', "%25")
+                    .replace(';', "%3B")
+                    .replace(',', "%2C")
+                    .replace(' ', "%20");
+                format!("{}={}", c.name, safe_value)
+            })
             .collect::<Vec<_>>()
             .join("; ")
     }
@@ -160,14 +174,58 @@ mod tests {
                     same_site: None,
                     expires: None,
                 },
+                SessionCookie {
+                    name: "sub".to_string(),
+                    value: "v3".to_string(),
+                    domain: ".example.com".to_string(),
+                    path: "/".to_string(),
+                    secure: false,
+                    http_only: false,
+                    same_site: None,
+                    expires: None,
+                },
             ],
             user_agent: String::new(),
             url: String::new(),
             extra_headers: HashMap::new(),
         };
 
+        // Exact match
         let example_cookies = session.cookies_for_domain("example.com");
-        assert_eq!(example_cookies.len(), 1);
-        assert_eq!(example_cookies[0].name, "site1");
+        assert_eq!(example_cookies.len(), 2); // "example.com" + ".example.com"
+
+        // Subdomain match
+        let sub_cookies = session.cookies_for_domain("sub.example.com");
+        assert_eq!(sub_cookies.len(), 2); // "example.com" + ".example.com"
+
+        // Must NOT match "badexample.com" (no dot boundary)
+        let bad_cookies = session.cookies_for_domain("badexample.com");
+        assert_eq!(bad_cookies.len(), 0);
+
+        // other.com only matches itself
+        let other_cookies = session.cookies_for_domain("other.com");
+        assert_eq!(other_cookies.len(), 1);
+    }
+
+    #[test]
+    fn test_cookie_header_escaping() {
+        let session = BrowserSession {
+            cookies: vec![SessionCookie {
+                name: "tok".to_string(),
+                value: "val;ue with spaces".to_string(),
+                domain: "x.com".to_string(),
+                path: "/".to_string(),
+                secure: false,
+                http_only: false,
+                same_site: None,
+                expires: None,
+            }],
+            user_agent: String::new(),
+            url: String::new(),
+            extra_headers: HashMap::new(),
+        };
+        let header = session.cookie_header();
+        assert!(!header.contains(';'));
+        assert!(header.contains("tok=val%3Bue%20with%20spaces"));
     }
 }

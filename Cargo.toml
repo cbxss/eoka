@@ -1,6 +1,6 @@
 [package]
 name = "eoka"
-version = "0.3.10"
+version = "0.3.11"
 edition = "2021"
 license = "MIT"
 description = "Stealth browser automation for Rust. Puppeteer/Playwright alternative with anti-bot bypass."
@@ -32,7 +32,6 @@ memmap2 = "0.9"
 
 # Human simulation
 rand = "0.10"
-smallvec = "1"
 
 # Base64 for screenshots
 base64 = "0.22"

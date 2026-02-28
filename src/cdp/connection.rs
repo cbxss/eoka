@@ -397,12 +397,14 @@ impl Session {
             .send("Page.getNavigationHistory", &PageGetNavigationHistory {})
             .await?;
         if history.current_index > 0 {
-            let entry_id = history.entries[history.current_index as usize - 1].id;
-            self.send::<_, serde_json::Value>(
-                "Page.navigateToHistoryEntry",
-                &PageNavigateToHistoryEntry { entry_id },
-            )
-            .await?;
+            let prev = history.current_index as usize - 1;
+            if let Some(entry) = history.entries.get(prev) {
+                self.send::<_, serde_json::Value>(
+                    "Page.navigateToHistoryEntry",
+                    &PageNavigateToHistoryEntry { entry_id: entry.id },
+                )
+                .await?;
+            }
         }
         Ok(())
     }
@@ -413,11 +415,10 @@ impl Session {
             .send("Page.getNavigationHistory", &PageGetNavigationHistory {})
             .await?;
         let next = history.current_index as usize + 1;
-        if next < history.entries.len() {
-            let entry_id = history.entries[next].id;
+        if let Some(entry) = history.entries.get(next) {
             self.send::<_, serde_json::Value>(
                 "Page.navigateToHistoryEntry",
-                &PageNavigateToHistoryEntry { entry_id },
+                &PageNavigateToHistoryEntry { entry_id: entry.id },
             )
             .await?;
         }
@@ -445,6 +446,8 @@ impl Session {
         format: Option<&str>,
         quality: Option<u8>,
     ) -> Result<Vec<u8>> {
+        // Chrome expects quality 0-100; clamp to valid range
+        let quality = quality.map(|q| q.min(100));
         let result: PageCaptureScreenshotResult = self
             .send(
                 "Page.captureScreenshot",

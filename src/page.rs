@@ -10,6 +10,16 @@ use crate::error::{Error, Result};
 use crate::stealth::Human;
 use crate::StealthConfig;
 
+/// Polling interval (ms) used by wait_for_* loop iterations.
+const POLL_INTERVAL_MS: u64 = 100;
+
+/// Settle time (ms) used after actions (click, navigate, hover) to let the
+/// page react before the next step.
+const SETTLE_MS: u64 = 100;
+
+/// Brief pause (ms) between micro-interactions (e.g. focus→type, select_all→delete).
+const INTERACTION_DELAY_MS: u64 = 50;
+
 /// Escape a string for safe use in JavaScript string literals
 fn escape_js_string(s: &str) -> String {
     s.replace('\\', "\\\\")
@@ -18,6 +28,9 @@ fn escape_js_string(s: &str) -> String {
         .replace('`', "\\`")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+        .replace('\0', "\\0")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
         .replace("${", "\\${")
 }
 
@@ -82,7 +95,7 @@ impl Page {
         }
         // Brief settle time for navigation to start. Use wait_for_navigation()
         // for reliable completion detection.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(SETTLE_MS)).await;
         Ok(())
     }
 
@@ -323,7 +336,7 @@ impl Page {
             )
             .await?;
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
 
         // Mouse up
         self.session
@@ -354,7 +367,7 @@ impl Page {
     pub async fn type_into(&self, selector: &str, text: &str) -> Result<()> {
         let element = self.find(selector).await?;
         element.click().await?;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
         self.session.insert_text(text).await
     }
 
@@ -367,21 +380,18 @@ impl Page {
     /// Try to click an element, returning Ok(false) if not found or not clickable
     #[must_use = "returns true if clicked, false if not found/visible"]
     pub async fn try_click(&self, selector: &str) -> Result<bool> {
-        match self.find(selector).await {
-            Ok(element) => match element.click().await {
-                Ok(()) => Ok(true),
-                Err(e) if is_element_cdp_error(&e) => Ok(false),
-                Err(e) => Err(e),
-            },
-            Err(e) if is_element_cdp_error(&e) => Ok(false),
-            Err(e) => Err(e),
-        }
+        self.try_click_impl(self.find(selector).await).await
     }
 
     /// Try to click an element by text, returning Ok(false) if not found or not clickable
     #[must_use = "returns true if clicked, false if not found/visible"]
     pub async fn try_click_by_text(&self, text: &str) -> Result<bool> {
-        match self.find_by_text(text).await {
+        self.try_click_impl(self.find_by_text(text).await).await
+    }
+
+    /// Shared impl for try_click and try_click_by_text
+    async fn try_click_impl(&self, find_result: Result<Element<'_>>) -> Result<bool> {
+        match find_result {
             Ok(element) => match element.click().await {
                 Ok(()) => Ok(true),
                 Err(e) if is_element_cdp_error(&e) => Ok(false),
@@ -396,7 +406,7 @@ impl Page {
     pub async fn fill(&self, selector: &str, value: &str) -> Result<()> {
         let element = self.find(selector).await?;
         element.click().await?;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
 
         // Focus + select via selector (don't rely on activeElement — popups can steal focus)
         let escaped = escape_js_string(selector);
@@ -425,7 +435,7 @@ impl Page {
     pub async fn human_type(&self, selector: &str, text: &str) -> Result<()> {
         // Click first
         self.human_click(selector).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(SETTLE_MS)).await;
 
         if self.config.human_typing {
             self.human().type_text(text).await
@@ -458,13 +468,13 @@ impl Page {
     pub async fn human_fill(&self, selector: &str, value: &str) -> Result<()> {
         // Human click on the field
         self.human_click(selector).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(SETTLE_MS)).await;
 
         // Select all to clear (Cmd+A / Ctrl+A behavior via select())
         self.execute("document.activeElement.select()").await?;
 
         // Small pause before typing
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
 
         // Type with human-like delays
         if self.config.human_typing {
@@ -557,10 +567,13 @@ impl Page {
         domain: Option<&str>,
         path: Option<&str>,
     ) -> Result<()> {
-        let url = self.url().await.ok();
+        // Propagate URL fetch errors — a None url causes Chrome to silently
+        // reject the cookie, which is worse than failing loudly.
+        let url = self.url().await?;
+        let url_ref = if url == "about:blank" { None } else { Some(url.as_str()) };
         let success = self
             .session
-            .set_cookie(name, value, url.as_deref(), domain, path)
+            .set_cookie(name, value, url_ref, domain, path)
             .await?;
 
         if !success {
@@ -571,9 +584,10 @@ impl Page {
 
     /// Delete a cookie
     pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
-        let url = self.url().await.ok();
+        let url = self.url().await?;
+        let url_ref = if url == "about:blank" { None } else { Some(url.as_str()) };
         self.session
-            .delete_cookies(name, url.as_deref(), domain)
+            .delete_cookies(name, url_ref, domain)
             .await
     }
 
@@ -622,7 +636,7 @@ impl Page {
                 return Err(Error::Navigation(error));
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(SETTLE_MS)).await;
         Ok(())
     }
 
@@ -691,9 +705,8 @@ impl Page {
                     Object.keys(localStorage).map(k => [k, localStorage.getItem(k)])
                 ))"#,
             )
-            .await
-            .unwrap_or_else(|_| "{}".to_string());
-        Ok(serde_json::from_str(&json).unwrap_or_default())
+            .await?;
+        Ok(serde_json::from_str(&json)?)
     }
 
     /// Clear all localStorage items.
@@ -736,9 +749,8 @@ impl Page {
                     Object.keys(sessionStorage).map(k => [k, sessionStorage.getItem(k)])
                 ))"#,
             )
-            .await
-            .unwrap_or_else(|_| "{}".to_string());
-        Ok(serde_json::from_str(&json).unwrap_or_default())
+            .await?;
+        Ok(serde_json::from_str(&json)?)
     }
 
     /// Clear all sessionStorage items.
@@ -749,9 +761,9 @@ impl Page {
     /// Dump localStorage, sessionStorage, and cookies into a single JSON value.
     /// Useful for capturing an authenticated session to restore later.
     pub async fn dump_storage(&self) -> Result<serde_json::Value> {
-        let local = self.local_storage_get_all().await.unwrap_or_default();
-        let session = self.session_storage_get_all().await.unwrap_or_default();
-        let cookies = self.cookies().await.unwrap_or_default();
+        let local = self.local_storage_get_all().await?;
+        let session = self.session_storage_get_all().await?;
+        let cookies = self.cookies().await?;
         Ok(serde_json::json!({
             "localStorage": local,
             "sessionStorage": session,
@@ -759,70 +771,61 @@ impl Page {
         }))
     }
 
-    /// Wait for an element to appear in the DOM
-    pub async fn wait_for(&self, selector: &str, timeout_ms: u64) -> Result<Element<'_>> {
+    /// Generic polling helper — calls `check` every `POLL_INTERVAL_MS` until it
+    /// returns `Ok(Some(value))`, then returns that value.  Returns `Err(Timeout)`
+    /// if `timeout_ms` elapses first.
+    async fn poll_until<T, F, Fut>(&self, timeout_ms: u64, error_msg: String, check: F) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Option<T>>,
+    {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_millis(timeout_ms);
-
         loop {
-            if let Ok(element) = self.find(selector).await {
-                return Ok(element);
+            if let Some(val) = check().await {
+                return Ok(val);
             }
-
             if start.elapsed() > timeout {
-                return Err(Error::Timeout(format!(
-                    "Element '{}' not found within {}ms",
-                    selector, timeout_ms
-                )));
+                return Err(Error::Timeout(error_msg));
             }
-
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
+    }
+
+    /// Wait for an element to appear in the DOM
+    pub async fn wait_for(&self, selector: &str, timeout_ms: u64) -> Result<Element<'_>> {
+        self.poll_until(
+            timeout_ms,
+            format!("Element '{}' not found within {}ms", selector, timeout_ms),
+            || async { self.find(selector).await.ok() },
+        ).await
     }
 
     /// Wait for an element to be visible and clickable
     pub async fn wait_for_visible(&self, selector: &str, timeout_ms: u64) -> Result<Element<'_>> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-
-        loop {
-            if let Ok(element) = self.find(selector).await {
-                // Check if we can compute box model (element is visible/rendered)
-                if element.center().await.is_ok() {
-                    return Ok(element);
+        self.poll_until(
+            timeout_ms,
+            format!("Element '{}' not visible within {}ms", selector, timeout_ms),
+            || async {
+                if let Ok(elem) = self.find(selector).await {
+                    if elem.center().await.is_ok() {
+                        return Some(elem);
+                    }
                 }
-            }
-
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout(format!(
-                    "Element '{}' not visible within {}ms",
-                    selector, timeout_ms
-                )));
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+                None
+            },
+        ).await
     }
 
     /// Wait for an element to disappear
     pub async fn wait_for_hidden(&self, selector: &str, timeout_ms: u64) -> Result<()> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-
-        loop {
-            if self.find(selector).await.is_err() {
-                return Ok(());
-            }
-
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout(format!(
-                    "Element '{}' still visible after {}ms",
-                    selector, timeout_ms
-                )));
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+        self.poll_until(
+            timeout_ms,
+            format!("Element '{}' still visible after {}ms", selector, timeout_ms),
+            || async {
+                if self.find(selector).await.is_err() { Some(()) } else { None }
+            },
+        ).await
     }
 
     /// Wait for a fixed duration
@@ -832,71 +835,40 @@ impl Page {
 
     /// Wait for an element with specific text to appear
     pub async fn wait_for_text(&self, text: &str, timeout_ms: u64) -> Result<Element<'_>> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-
-        loop {
-            if let Ok(element) = self.find_by_text(text).await {
-                return Ok(element);
-            }
-
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout(format!(
-                    "Element with text '{}' not found within {}ms",
-                    text, timeout_ms
-                )));
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+        self.poll_until(
+            timeout_ms,
+            format!("Element with text '{}' not found within {}ms", text, timeout_ms),
+            || async { self.find_by_text(text).await.ok() },
+        ).await
     }
 
     /// Wait for the URL to contain a specific string
     pub async fn wait_for_url_contains(&self, pattern: &str, timeout_ms: u64) -> Result<()> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-
-        loop {
-            if let Ok(url) = self.url().await {
-                if url.contains(pattern) {
-                    return Ok(());
+        self.poll_until(
+            timeout_ms,
+            format!("URL did not contain '{}' within {}ms", pattern, timeout_ms),
+            || async {
+                if let Ok(url) = self.url().await {
+                    if url.contains(pattern) { return Some(()); }
                 }
-            }
-
-            if start.elapsed() > timeout {
-                let current_url = self.url().await.unwrap_or_else(|_| "unknown".to_string());
-                return Err(Error::Timeout(format!(
-                    "URL did not contain '{}' within {}ms (current: {})",
-                    pattern, timeout_ms, current_url
-                )));
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+                None
+            },
+        ).await
     }
 
     /// Wait for URL to change from current URL
     pub async fn wait_for_url_change(&self, timeout_ms: u64) -> Result<String> {
         let original_url = self.url().await?;
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-
-        loop {
-            if let Ok(url) = self.url().await {
-                if url != original_url {
-                    return Ok(url);
+        self.poll_until(
+            timeout_ms,
+            format!("URL did not change from '{}' within {}ms", original_url, timeout_ms),
+            || async {
+                if let Ok(url) = self.url().await {
+                    if url != original_url { return Some(url); }
                 }
-            }
-
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout(format!(
-                    "URL did not change from '{}' within {}ms",
-                    original_url, timeout_ms
-                )));
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+                None
+            },
+        ).await
     }
     /// Enable network request capture
     /// NOTE: This enables Network.enable which may be slightly detectable by advanced anti-bot
@@ -941,25 +913,11 @@ impl Page {
     ///
     /// Returns the first selector that matches.
     pub async fn wait_for_any(&self, selectors: &[&str], timeout_ms: u64) -> Result<Element<'_>> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-
-        loop {
-            for selector in selectors {
-                if let Ok(element) = self.find(selector).await {
-                    return Ok(element);
-                }
-            }
-
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout(format!(
-                    "None of selectors found within {}ms: {:?}",
-                    timeout_ms, selectors
-                )));
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+        self.poll_until(
+            timeout_ms,
+            format!("None of selectors found within {}ms: {:?}", timeout_ms, selectors),
+            || async { self.find_any(selectors).await.ok() },
+        ).await
     }
     /// Wait for network to become idle (no pending XHR/fetch for `idle_time_ms`)
     pub async fn wait_for_network_idle(&self, idle_time_ms: u64, timeout_ms: u64) -> Result<()> {
@@ -1004,18 +962,19 @@ impl Page {
             })()
         "#;
 
-        // Install the interceptors (use evaluate_sync to avoid blocking on busy JS thread)
+        // Install the interceptors (use evaluate_sync to avoid blocking on busy JS thread).
+        // Re-install on every poll iteration since full-page navigations destroy the
+        // previous window context along with our __eoka_pending_requests counter.
         let _: i32 = self.evaluate_sync(check_idle_js).await.unwrap_or(0);
 
         let mut idle_start: Option<std::time::Instant> = None;
 
         loop {
-            // Use evaluate_sync (await_promise=false) so Chrome returns immediately
-            // instead of waiting for the JS thread to drain its microtask queue.
-            // On heavy SPAs (React/Next.js hydration), evaluate() with await_promise=true
-            // blocks until the JS thread is free, which can be many seconds.
+            // Re-install interceptors if the page navigated (counter will be undefined
+            // on the new document). This is cheap — the guard inside check_idle_js
+            // skips setup when __eoka_pending_requests is already defined.
             let pending: i32 = self
-                .evaluate_sync("window.__eoka_pending_requests || 0")
+                .evaluate_sync(check_idle_js)
                 .await
                 .unwrap_or(0);
 
@@ -1034,12 +993,17 @@ impl Page {
             }
 
             if start.elapsed() > timeout {
-                // Return Ok on timeout — heavy SPAs (React apps with polling/analytics)
-                // never go fully network-idle. The page is still usable.
-                return Ok(());
+                tracing::warn!(
+                    "wait_for_network_idle timed out after {}ms with {} pending request(s)",
+                    timeout_ms, pending
+                );
+                return Err(Error::Timeout(format!(
+                    "Network not idle after {}ms ({} pending requests)",
+                    timeout_ms, pending
+                )));
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
         }
     }
     /// Get a list of all frames on the page
@@ -1066,7 +1030,13 @@ impl Page {
         Ok(frames)
     }
 
-    /// Execute JavaScript inside an iframe
+    /// Execute JavaScript inside an iframe.
+    ///
+    /// # Safety
+    ///
+    /// `expression` is evaluated as **code** (via the `Function` constructor),
+    /// not as a string literal. Do not pass untrusted user input as the
+    /// expression — it will be executed in the iframe's JS context.
     pub async fn evaluate_in_frame<T: serde::de::DeserializeOwned>(
         &self,
         frame_selector: &str,
@@ -1081,8 +1051,8 @@ impl Page {
             (() => {{
                 const iframe = document.querySelector('{escaped_frame}');
                 if (!iframe || !iframe.contentWindow) throw new Error('Frame not found: {escaped_frame}');
-                const fn = new iframe.contentWindow.Function('return (' + '{escaped_expr}' + ')');
-                return fn.call(iframe.contentWindow);
+                const _exec = new iframe.contentWindow.Function('return (' + '{escaped_expr}' + ')');
+                return _exec.call(iframe.contentWindow);
             }})()
             "#,
             escaped_frame = escaped_frame,
@@ -1225,7 +1195,7 @@ impl Page {
         element.scroll_into_view().await?;
         let (x, y) = element.center().await?;
         Human::new(&self.session).move_to(x, y).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(SETTLE_MS)).await;
         Ok(())
     }
 
@@ -1237,31 +1207,19 @@ impl Page {
         let (key_str, code_str, vk) = key_to_codes(key_name);
         let modifiers = if mods != 0 { Some(mods) } else { None };
 
-        self.session
-            .dispatch_key_event_full(InputDispatchKeyEventFull {
-                r#type: KeyEventType::KeyDown,
-                modifiers,
-                key: Some(key_str.into()),
-                code: Some(code_str.into()),
-                windows_virtual_key_code: vk,
-                native_virtual_key_code: vk,
-                ..Default::default()
-            })
-            .await?;
+        let make_event = |event_type| InputDispatchKeyEventFull {
+            r#type: event_type,
+            modifiers,
+            key: Some(key_str.into()),
+            code: Some(code_str.into()),
+            windows_virtual_key_code: vk,
+            native_virtual_key_code: vk,
+            ..Default::default()
+        };
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        self.session
-            .dispatch_key_event_full(InputDispatchKeyEventFull {
-                r#type: KeyEventType::KeyUp,
-                modifiers,
-                key: Some(key_str.into()),
-                code: Some(code_str.into()),
-                windows_virtual_key_code: vk,
-                native_virtual_key_code: vk,
-                ..Default::default()
-            })
-            .await
+        self.session.dispatch_key_event_full(make_event(KeyEventType::KeyDown)).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
+        self.session.dispatch_key_event_full(make_event(KeyEventType::KeyUp)).await
     }
 
     /// Platform-aware select all (Cmd+A on Mac, Ctrl+A elsewhere)
@@ -1521,7 +1479,7 @@ impl<'a> Element<'a> {
     /// Type text into this element
     pub async fn type_text(&self, text: &str) -> Result<()> {
         self.click().await?;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
         self.page.session.insert_text(text).await
     }
 
@@ -1773,5 +1731,9 @@ mod tests {
         assert_eq!(escape_js_string("line1\nline2"), "line1\\nline2");
         assert_eq!(escape_js_string("back\\slash"), "back\\\\slash");
         assert_eq!(escape_js_string("${var}"), "\\${var}");
+        // Null byte and Unicode line terminators must be escaped
+        assert_eq!(escape_js_string("a\0b"), "a\\0b");
+        assert_eq!(escape_js_string("a\u{2028}b"), "a\\u2028b");
+        assert_eq!(escape_js_string("a\u{2029}b"), "a\\u2029b");
     }
 }

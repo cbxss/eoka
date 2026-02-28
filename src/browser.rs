@@ -88,6 +88,8 @@ pub struct Browser {
     config: Arc<StealthConfig>,
     /// User data directory (cleaned up on close; None when connecting to existing instance)
     user_data_dir: Option<PathBuf>,
+    /// Patched Chrome binary directory (cleaned up on close to avoid ~400MB disk leak)
+    patched_dir: Option<PathBuf>,
     /// Evasion script (cached)
     evasion_script: String,
 }
@@ -121,11 +123,13 @@ impl Browser {
         };
 
         // Optionally patch the binary
-        let chrome_path = if config.patch_binary {
+        let (chrome_path, patched_dir) = if config.patch_binary {
             let patcher = ChromePatcher::new(&chrome_path)?;
-            patcher.get_patched_path()?
+            let patched = patcher.get_patched_path()?;
+            let dir = patched.parent().map(|p| p.to_path_buf());
+            (patched, dir)
         } else {
-            chrome_path
+            (chrome_path, None)
         };
 
         // Build args
@@ -156,6 +160,7 @@ impl Browser {
             connection,
             config,
             user_data_dir: Some(user_data_dir),
+            patched_dir,
             evasion_script,
         })
     }
@@ -164,8 +169,15 @@ impl Browser {
     /// Obtain the URL from `curl http://localhost:9222/json/version`.
     /// Does not patch the binary or manage the Chrome process.
     /// Evasion scripts are still injected into new pages.
+    /// Uses default StealthConfig — use `connect_with_config()` to customize.
     pub async fn connect(ws_url: &str) -> Result<Self> {
-        let config = Arc::new(StealthConfig::default());
+        Self::connect_with_config(ws_url, StealthConfig::default()).await
+    }
+
+    /// Connect to an existing Chrome instance with a custom config.
+    /// Allows customizing CDP timeout, evasion scripts, proxy auth, etc.
+    pub async fn connect_with_config(ws_url: &str, config: StealthConfig) -> Result<Self> {
+        let config = Arc::new(config);
         let transport = crate::cdp::transport::Transport::connect(ws_url, config.cdp_timeout)?;
         let connection = Connection::new(transport);
         let version = connection.version().await?;
@@ -175,33 +187,36 @@ impl Browser {
             connection,
             config,
             user_data_dir: None,
+            patched_dir: None,
             evasion_script,
         })
     }
 
+    /// Set up a session with evasion scripts and proxy auth.
+    /// Common logic shared by new_page, new_blank_page, and attach_page.
+    async fn setup_session(&self, session: &crate::cdp::Session) -> Result<()> {
+        session.page_enable().await?;
+
+        if self.config.proxy_username.is_some() && self.config.proxy_password.is_some() {
+            session.fetch_enable(true).await?;
+        }
+
+        session
+            .add_script_to_evaluate_on_new_document(&self.evasion_script)
+            .await?;
+
+        Ok(())
+    }
+
     /// Create a new page and navigate to URL
     pub async fn new_page(&self, url: &str) -> Result<Page> {
-        // Create a new target (window size is set via --window-size Chrome arg)
         let target_id = self
             .connection
             .create_target("about:blank", None, None)
             .await?;
 
-        // Attach to the target
         let session = self.connection.attach_to_target(&target_id).await?;
-
-        // Enable page events
-        session.page_enable().await?;
-
-        // Enable Fetch domain for proxy auth if credentials are configured
-        if self.config.proxy_username.is_some() && self.config.proxy_password.is_some() {
-            session.fetch_enable(true).await?;
-        }
-
-        // Inject evasion scripts BEFORE navigation
-        session
-            .add_script_to_evaluate_on_new_document(&self.evasion_script)
-            .await?;
+        self.setup_session(&session).await?;
 
         // Navigate to URL
         let nav_result = session.navigate(url).await?;
@@ -210,8 +225,6 @@ impl Browser {
         }
 
         // Brief settle time for the initial page load to start.
-        // For reliable waiting, callers should use page.wait_for_navigation() or
-        // page.wait_for(selector, timeout) after this returns.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         Ok(Page::new(session, Arc::clone(&self.config)))
@@ -225,15 +238,7 @@ impl Browser {
             .await?;
 
         let session = self.connection.attach_to_target(&target_id).await?;
-        session.page_enable().await?;
-
-        if self.config.proxy_username.is_some() && self.config.proxy_password.is_some() {
-            session.fetch_enable(true).await?;
-        }
-
-        session
-            .add_script_to_evaluate_on_new_document(&self.evasion_script)
-            .await?;
+        self.setup_session(&session).await?;
 
         Ok(Page::new(session, Arc::clone(&self.config)))
     }
@@ -262,16 +267,7 @@ impl Browser {
     /// Use `tabs()` to discover popup target IDs, then call this to get a Page handle.
     pub async fn attach_page(&self, target_id: &str) -> Result<Page> {
         let session = self.connection.attach_to_target(target_id).await?;
-        session.page_enable().await?;
-
-        if self.config.proxy_username.is_some() && self.config.proxy_password.is_some() {
-            session.fetch_enable(true).await?;
-        }
-
-        session
-            .add_script_to_evaluate_on_new_document(&self.evasion_script)
-            .await?;
-
+        self.setup_session(&session).await?;
         Ok(Page::new(session, Arc::clone(&self.config)))
     }
 
@@ -295,6 +291,11 @@ impl Browser {
             let _ = std::fs::remove_dir_all(dir);
         }
 
+        // Clean up patched Chrome binary directory (~400MB)
+        if let Some(ref dir) = self.patched_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
         Ok(())
     }
 }
@@ -304,6 +305,16 @@ impl Drop for Browser {
         // Best-effort cleanup of user data directory if close() wasn't called.
         // The Transport's Drop impl handles killing the Chrome process.
         if let Some(ref dir) = self.user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        // Clean up patched Chrome binary directory (~400MB).
+        // Safe because `connection` is declared before `patched_dir` in the struct,
+        // so Rust drops it first — killing Chrome via Transport::Drop before we
+        // attempt to delete the patched binary. On Unix, remove_dir_all succeeds
+        // even if the binary is still memory-mapped (unlink semantics).
+        // Prefer calling `close().await` for an explicit, ordered shutdown.
+        if let Some(ref dir) = self.patched_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
     }

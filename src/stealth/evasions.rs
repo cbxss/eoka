@@ -177,11 +177,13 @@ try {
         configurable: true
     });
 } catch(e) {
-    // Fallback: run cleanup periodically if proxy fails
-    setInterval(() => {
+    // Fallback: run cleanup a few times if proxy fails, then stop
+    let cleanupCount = 0;
+    const cleanupTimer = setInterval(() => {
         cleanupWindow();
         cleanupDocument();
-    }, 100);
+        if (++cleanupCount >= 10) clearInterval(cleanupTimer);
+    }, 200);
 }
 
 // Clean up document element attributes
@@ -662,10 +664,12 @@ if (!navigator.bluetooth) {
 }
 "#;
 
-/// Timezone consistency - ensure Date timezone matches claimed location
+/// Timezone consistency - ensure Date timezone matches claimed location.
+/// The `__EOKA_TIMEZONE__` placeholder is replaced at build time with the
+/// actual IANA timezone from StealthConfig.
 pub const TIMEZONE_EVASION: &str = r#"
 // Ensure Intl.DateTimeFormat returns consistent timezone
-const targetTimezone = 'America/Los_Angeles';
+const targetTimezone = '__EOKA_TIMEZONE__';
 const origDateTimeFormat = Intl.DateTimeFormat;
 
 Intl.DateTimeFormat = function(locales, options) {
@@ -676,19 +680,70 @@ Intl.DateTimeFormat = function(locales, options) {
 Intl.DateTimeFormat.prototype = origDateTimeFormat.prototype;
 Intl.DateTimeFormat.supportedLocalesOf = origDateTimeFormat.supportedLocalesOf;
 
-// Override Date.prototype.getTimezoneOffset to match
-// PST/PDT is UTC-8/UTC-7, so offset is 480/420 minutes
-const origGetTimezoneOffset = Date.prototype.getTimezoneOffset;
-Date.prototype.getTimezoneOffset = function() {
-    // Check if we're in DST (rough approximation)
-    const month = this.getMonth();
-    const isDST = month >= 2 && month <= 10; // March to November
-    return isDST ? 420 : 480; // PDT: -7, PST: -8
-};
+// Override Date.prototype.getTimezoneOffset to match the target timezone.
+// Precompute offsets for Jan and Jul to handle DST, avoiding per-call
+// toLocaleString() which is ~10x slower than native and timing-detectable.
+{
+    const _origGetTZO = Date.prototype.getTimezoneOffset;
+    function _calcOffset(date) {
+        const utcStr = date.toLocaleString('en-US', { timeZone: 'UTC' });
+        const tzStr = date.toLocaleString('en-US', { timeZone: targetTimezone });
+        return (new Date(utcStr) - new Date(tzStr)) / 60000;
+    }
+    const year = new Date().getFullYear();
+    const janOffset = _calcOffset(new Date(year, 0, 15));
+    const julOffset = _calcOffset(new Date(year, 6, 15));
+    // Standard offset is the larger value (more positive = further west)
+    const stdOffset = Math.max(janOffset, julOffset);
+    const dstOffset = Math.min(janOffset, julOffset);
+    // If offsets differ, this timezone observes DST
+    const hasDST = janOffset !== julOffset;
+    // Which months are DST depends on hemisphere: if Jul is the smaller
+    // offset, DST is northern-hemisphere (Mar-Nov); otherwise southern.
+    const dstIsJul = julOffset < janOffset;
+
+    Date.prototype.getTimezoneOffset = function() {
+        if (!hasDST) return stdOffset;
+        // Quick month-based check — accurate for the vast majority of dates.
+        // (Exact DST transition dates vary by zone, but this avoids toLocaleString.)
+        const m = this.getUTCMonth();
+        const isDST = dstIsJul ? (m >= 2 && m <= 10) : (m <= 2 || m >= 10);
+        return isDST ? dstOffset : stdOffset;
+    };
+}
 "#;
+
+/// Common timezones for random selection (balanced across regions)
+const COMMON_TIMEZONES: &[&str] = &[
+    // Americas (4)
+    "America/New_York",
+    "America/Chicago",
+    "America/Los_Angeles",
+    "America/Sao_Paulo",
+    // Europe (4)
+    "Europe/London",
+    "Europe/Paris",
+    "Europe/Berlin",
+    "Europe/Moscow",
+    // Asia-Pacific (4)
+    "Asia/Tokyo",
+    "Asia/Shanghai",
+    "Asia/Kolkata",
+    "Australia/Sydney",
+];
 
 /// Build the complete evasion script based on config
 pub fn build_evasion_script(config: &StealthConfig) -> String {
+    // Resolve timezone: use config value, or pick a random common one
+    let timezone = config.timezone.clone().unwrap_or_else(|| {
+        use rand::prelude::IndexedRandom;
+        let mut rng = rand::rng();
+        COMMON_TIMEZONES
+            .choose(&mut rng)
+            .unwrap_or(&"America/New_York")
+            .to_string()
+    });
+
     let mut scripts = vec![
         WEBDRIVER_EVASION,
         CDP_EVASION,
@@ -712,8 +767,9 @@ pub fn build_evasion_script(config: &StealthConfig) -> String {
         scripts.push(FINGERPRINT_EVASION);
     }
 
-    // Wrap in IIFE
-    format!("(function(){{{}}})();", scripts.join("\n"))
+    // Wrap in IIFE and replace timezone placeholder
+    let script = format!("(function(){{{}}})();", scripts.join("\n"));
+    script.replace("__EOKA_TIMEZONE__", &timezone)
 }
 
 /// Get the full evasion script (all options enabled)

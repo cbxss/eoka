@@ -125,6 +125,9 @@ pub struct StealthConfig {
     pub proxy_password: Option<String>,
     /// CDP command timeout in seconds (default: 30, increase for slow proxies)
     pub cdp_timeout: u64,
+    /// IANA timezone (default: random from common US/EU timezones).
+    /// Set to a specific value like "America/New_York" to control the timezone.
+    pub timezone: Option<String>,
 }
 
 impl Default for StealthConfig {
@@ -147,6 +150,7 @@ impl Default for StealthConfig {
             proxy_username: None,
             proxy_password: None,
             cdp_timeout: 30,
+            timezone: None, // Random from common timezones
         }
     }
 }
@@ -172,6 +176,7 @@ impl StealthConfig {
             proxy_username: None,
             proxy_password: None,
             cdp_timeout: 30,
+            timezone: None,
         }
     }
 

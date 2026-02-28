@@ -70,8 +70,8 @@ pub fn random_user_agent() -> String {
 
     let chrome_version = CHROME_VERSIONS.choose(&mut rng).unwrap();
 
-    // 70% Mac, 30% Windows
-    if rng.random_bool(0.7) {
+    // 30% Mac, 70% Windows (matches real internet traffic)
+    if rng.random_bool(0.3) {
         let macos = MACOS_VERSIONS.choose(&mut rng).unwrap();
         format!(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X {}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{} Safari/537.36",
@@ -113,7 +113,7 @@ impl Fingerprint {
     pub fn random() -> Self {
         let mut rng = rand::rng();
 
-        let platform = if rng.random_bool(0.7) {
+        let platform = if rng.random_bool(0.3) {
             Platform::MacOS
         } else {
             Platform::Windows
@@ -143,7 +143,16 @@ impl Fingerprint {
             color_depth: 24,
             hardware_concurrency,
             device_memory,
-            timezone: "America/Los_Angeles".to_string(),
+            timezone: {
+                use rand::prelude::IndexedRandom;
+                let timezones = [
+                    "America/New_York", "America/Chicago", "America/Los_Angeles",
+                    "America/Sao_Paulo", "Europe/London", "Europe/Paris",
+                    "Europe/Berlin", "Europe/Moscow", "Asia/Tokyo",
+                    "Asia/Shanghai", "Asia/Kolkata", "Australia/Sydney",
+                ];
+                timezones.choose(&mut rng).unwrap_or(&"America/New_York").to_string()
+            },
             languages: vec!["en-US".to_string(), "en".to_string()],
             webgl_vendor: webgl_vendor.to_string(),
             webgl_renderer: webgl_renderer.to_string(),

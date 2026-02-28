@@ -4,18 +4,11 @@
 //! behavior-based bot detection.
 
 use rand::RngExt;
-use smallvec::SmallVec;
-use std::cell::RefCell;
 use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::cdp::{KeyEventType, MouseButton, MouseEventType, Session};
 use crate::error::Result;
-
-// Thread-local RNG
-thread_local! {
-    static RNG: RefCell<rand::rngs::ThreadRng> = RefCell::new(rand::rng());
-}
 
 /// Speed mode for human simulation
 #[derive(Debug, Clone, Copy, Default)]
@@ -56,26 +49,30 @@ impl HumanSpeed {
 }
 
 fn random_range(min: u64, max: u64) -> u64 {
-    RNG.with(|rng| rng.borrow_mut().random_range(min..max))
+    debug_assert!(min < max, "random_range: min ({}) must be less than max ({})", min, max);
+    if min >= max {
+        return min;
+    }
+    rand::rng().random_range(min..max)
 }
 
 fn random_f64_range(min: f64, max: f64) -> f64 {
-    RNG.with(|rng| rng.borrow_mut().random_range(min..max))
+    debug_assert!(min < max, "random_f64_range: min ({}) must be less than max ({})", min, max);
+    if min >= max {
+        return min;
+    }
+    rand::rng().random_range(min..max)
 }
 
 fn random_bool(probability: f64) -> bool {
-    RNG.with(|rng| rng.borrow_mut().random_bool(probability))
+    rand::rng().random_bool(probability)
 }
 
 /// Point type
 type Point = (f64, f64);
 
-/// Stack-allocated storage for typical mouse paths
-type PointVec = SmallVec<[Point; 64]>;
-
 /// Generate Bezier curve for natural mouse movement
-#[inline]
-fn bezier_curve(start: Point, end: Point, num_points: usize) -> PointVec {
+fn bezier_curve(start: Point, end: Point, num_points: usize) -> Vec<Point> {
     let num_points = num_points.max(2);
 
     let cp1 = (
@@ -87,7 +84,7 @@ fn bezier_curve(start: Point, end: Point, num_points: usize) -> PointVec {
         start.1 + (end.1 - start.1) * random_f64_range(0.7, 1.0) + random_f64_range(-50.0, 50.0),
     );
 
-    let mut points = PointVec::new();
+    let mut points = Vec::with_capacity(num_points);
 
     for i in 0..num_points {
         let t = i as f64 / (num_points - 1) as f64;
@@ -129,9 +126,12 @@ impl<'a> Human<'a> {
 
     /// Move mouse to target position with human-like Bezier curve
     pub async fn move_to(&self, target_x: f64, target_y: f64) -> Result<()> {
-        // Start from random position
-        let start_x = random_f64_range(100.0, 800.0);
-        let start_y = random_f64_range(100.0, 600.0);
+        // Start from a random position relative to the target — this looks more
+        // natural than a fixed range and works on any viewport size.
+        let offset_x = random_f64_range(-300.0, 300.0);
+        let offset_y = random_f64_range(-200.0, 200.0);
+        let start_x = (target_x + offset_x).max(0.0);
+        let start_y = (target_y + offset_y).max(0.0);
 
         let distance = ((target_x - start_x).powi(2) + (target_y - start_y).powi(2)).sqrt();
         let num_points = self.speed.mouse_points(distance);

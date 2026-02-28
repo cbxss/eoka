@@ -40,6 +40,11 @@ pub enum NetworkEvent {
     },
 }
 
+/// Maximum number of in-flight requests tracked before evicting the oldest.
+/// Prevents unbounded memory growth from long-lived connections (WebSocket,
+/// SSE, long-polling) that never fire loadingFinished/loadingFailed.
+const MAX_INFLIGHT_REQUESTS: usize = 10_000;
+
 /// Watches network events and provides a stream of captured requests
 pub struct NetworkWatcher {
     /// In-flight requests (request_id -> CapturedRequest)
@@ -120,9 +125,20 @@ impl NetworkWatcher {
             complete: false,
         };
 
-        // Store the request
+        // Store the request, evicting oldest if at capacity
         {
             let mut requests = self.requests.lock().await;
+            if requests.len() >= MAX_INFLIGHT_REQUESTS {
+                // Evict the entry with the lowest timestamp (oldest request)
+                if let Some(oldest_id) = requests
+                    .iter()
+                    .min_by(|a, b| a.1.timestamp.partial_cmp(&b.1.timestamp).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(id, _)| id.clone())
+                {
+                    requests.remove(&oldest_id);
+                    tracing::debug!("Evicted oldest in-flight request (cap={})", MAX_INFLIGHT_REQUESTS);
+                }
+            }
             requests.insert(event.request_id.clone(), request.clone());
         }
 
@@ -159,12 +175,12 @@ impl NetworkWatcher {
     }
 
     async fn on_loading_finished(&self, event: NetworkLoadingFinishedEvent) {
-        // Mark request as complete
+        // Remove completed request from the in-flight map to prevent unbounded growth.
+        // Consumers already received the full CapturedRequest via RequestStarted and
+        // ResponseReceived events.
         {
             let mut requests = self.requests.lock().await;
-            if let Some(req) = requests.get_mut(&event.request_id) {
-                req.complete = true;
-            }
+            requests.remove(&event.request_id);
         }
 
         // Send event

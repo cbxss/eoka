@@ -81,6 +81,8 @@ pub struct TargetInfo {
 #[serde(rename_all = "camelCase")]
 pub struct PageNavigate {
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub referrer: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -729,4 +731,166 @@ pub struct TargetTargetDestroyedEvent {
 pub struct FetchEnable {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handle_auth_requests: Option<bool>,
+}
+
+// === 2026 additions: headers, cookies, CSP bypass, UA, TLS, dialogs, Fetch interception ===
+
+/// Network.setExtraHTTPHeaders — inject extra headers into every request on this session
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSetExtraHTTPHeaders {
+    pub headers: HashMap<String, String>,
+}
+
+/// Network.clearBrowserCookies — wipe all cookies for this browser context
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct NetworkClearBrowserCookies {}
+
+/// Network.setCookies — bulk-set multiple cookies at once
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSetCookies {
+    pub cookies: Vec<NetworkSetCookie>,
+}
+
+/// Page.setBypassCSP — disable CSP enforcement for the current page
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageSetBypassCSP {
+    pub enabled: bool,
+}
+
+/// Emulation.setUserAgentOverride — override the User-Agent / Accept-Language strings
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmulationSetUserAgentOverride {
+    pub user_agent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept_language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
+/// Security.setIgnoreCertificateErrors — bypass TLS errors for this session
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecuritySetIgnoreCertificateErrors {
+    pub ignore: bool,
+}
+
+/// Page.handleJavaScriptDialog — accept or dismiss an open JS dialog
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageHandleJavaScriptDialog {
+    pub accept: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_text: Option<String>,
+}
+
+/// Event fired when a JS alert/confirm/prompt opens (Page domain must be enabled)
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageJavascriptDialogOpeningEvent {
+    pub url: String,
+    pub message: String,
+    /// "alert" | "confirm" | "prompt" | "beforeunload"
+    pub r#type: String,
+    #[serde(default)]
+    pub has_browser_handler: bool,
+    #[serde(default)]
+    pub default_prompt: Option<String>,
+}
+
+/// A URL pattern used to filter which requests Fetch.enable intercepts
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestPattern {
+    /// Glob URL pattern, e.g. "*/api/*" (matches all if omitted)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url_pattern: Option<String>,
+    /// Resource type, e.g. "Document", "XHR", "Fetch", "Script"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
+    /// "Request" or "HeadersReceived"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_stage: Option<String>,
+}
+
+/// Fetch.enable with URL patterns for request interception
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchEnableWithPatterns {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patterns: Option<Vec<RequestPattern>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle_auth_requests: Option<bool>,
+}
+
+/// Fetch.disable — turn off Fetch domain interception
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FetchDisable {}
+
+/// A single header name/value pair used in Fetch.fulfillRequest / Fetch.continueRequest
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchHeaderEntry {
+    pub name: String,
+    pub value: String,
+}
+
+/// Fetch.continueRequest — pass an intercepted request through (optionally modified)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchContinueRequest {
+    pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Vec<FetchHeaderEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intercept_response: Option<bool>,
+}
+
+/// Fetch.fulfillRequest — respond to an intercepted request with a synthetic response
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchFulfillRequest {
+    pub request_id: String,
+    pub response_code: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_headers: Option<Vec<FetchHeaderEntry>>,
+    /// base64-encoded body
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_phrase: Option<String>,
+}
+
+/// Fetch.failRequest — abort an intercepted request with a network error
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchFailRequest {
+    pub request_id: String,
+    /// CDP NetworkErrorReason, e.g. "Aborted", "AccessDenied", "AddressUnreachable"
+    pub error_reason: String,
+}
+
+/// Event fired by the Fetch domain when a request is paused for interception
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchRequestPausedEvent {
+    pub request_id: String,
+    pub request: NetworkRequest,
+    pub frame_id: String,
+    pub resource_type: String,
+    #[serde(default)]
+    pub network_id: Option<String>,
+    #[serde(default)]
+    pub response_status_code: Option<u16>,
+    #[serde(default)]
+    pub response_headers: Option<Vec<FetchHeaderEntry>>,
 }

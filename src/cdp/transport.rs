@@ -147,8 +147,8 @@ fn read_ws_frame(stream: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
 
 /// CDP Transport - handles sending commands and receiving responses via WebSocket
 pub struct Transport {
-    /// The Chrome child process
-    child: Mutex<Child>,
+    /// The Chrome child process (None when connecting to an existing instance)
+    child: Option<Mutex<Child>>,
     /// WebSocket stream for writing
     writer: Mutex<TcpStream>,
     /// Next message ID
@@ -298,7 +298,91 @@ impl Transport {
         });
 
         Ok(Self {
-            child: Mutex::new(child),
+            child: Some(Mutex::new(child)),
+            writer: Mutex::new(stream),
+            next_id: AtomicU64::new(1),
+            pending,
+            event_rx: Mutex::new(event_rx),
+            cmd_timeout,
+        })
+    }
+
+
+    /// Connect to an existing Chrome instance at the given WebSocket URL.
+    /// Does not manage a Chrome process — caller owns the browser lifecycle.
+    pub fn connect(ws_url: &str, cdp_timeout_secs: u64) -> Result<Self> {
+        // Parse WebSocket URL
+        let url = ws_url.trim_start_matches("ws://");
+        let (host_port, _path) = url.split_once('/').unwrap_or((url, ""));
+
+        // Connect TCP
+        let mut stream = TcpStream::connect(host_port)
+            .map_err(|e| Error::transport_io("Failed to connect to Chrome", e))?;
+
+        // WebSocket handshake
+        let path = format!("/{}", url.split_once('/').map(|(_, p)| p).unwrap_or(""));
+        let key = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            rand::random::<[u8; 16]>(),
+        );
+
+        let handshake = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n\r\n",
+            path, host_port, key
+        );
+
+        use std::io::{BufRead, Write};
+        stream
+            .write_all(handshake.as_bytes())
+            .map_err(|e| Error::transport_io("Handshake write failed", e))?;
+
+        let mut reader = std::io::BufReader::new(&stream);
+        let mut response_buf = Vec::with_capacity(1024);
+        loop {
+            let available = reader
+                .fill_buf()
+                .map_err(|e| Error::transport_io("Handshake read failed", e))?;
+            if available.is_empty() {
+                return Err(Error::transport("Connection closed during WebSocket handshake"));
+            }
+            let len = available.len();
+            response_buf.extend_from_slice(available);
+            reader.consume(len);
+            if response_buf.len() >= 4 && response_buf[response_buf.len() - 4..] == *b"\r\n\r\n" {
+                break;
+            }
+            if response_buf.len() > 8192 {
+                return Err(Error::transport("WebSocket handshake response too large"));
+            }
+        }
+        let response_str = String::from_utf8_lossy(&response_buf);
+        if !response_str.contains("101") {
+            return Err(Error::transport(format!(
+                "WebSocket handshake failed: {}",
+                response_str
+            )));
+        }
+
+        tracing::debug!("WebSocket connected to {}", ws_url);
+        let cmd_timeout = std::time::Duration::from_secs(cdp_timeout_secs);
+
+        let reader_stream = stream
+            .try_clone()
+            .map_err(|e| Error::transport_io("Failed to clone stream", e))?;
+        reader_stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(cdp_timeout_secs * 4)))
+            .map_err(|e| Error::transport_io("Failed to set read timeout", e))?;
+
+        let pending: Arc<PendingMap> = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (event_tx, event_rx) = mpsc::channel(256);
+
+        let pending_clone = Arc::clone(&pending);
+        std::thread::spawn(move || {
+            Self::reader_loop(reader_stream, pending_clone, event_tx, None);
+        });
+
+        Ok(Self {
+            child: None,
             writer: Mutex::new(stream),
             next_id: AtomicU64::new(1),
             pending,
@@ -592,18 +676,21 @@ impl Transport {
             let _ = std::io::Write::write_all(&mut *writer, &close_frame);
         }
 
-        let mut child = self.child.lock().await;
-        let _ = child.kill();
-        let _ = child.wait();
+        if let Some(ref child) = self.child {
+            let mut c = child.lock().await;
+            let _ = c.kill();
+            let _ = c.wait();
+        }
         Ok(())
     }
 }
 
 impl Drop for Transport {
     fn drop(&mut self) {
-        // Try to kill Chrome process on drop
-        if let Ok(mut child) = self.child.try_lock() {
-            let _ = child.kill();
+        if let Some(ref child) = self.child {
+            if let Ok(mut c) = child.try_lock() {
+                let _ = c.kill();
+            }
         }
     }
 }

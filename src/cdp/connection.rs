@@ -175,9 +175,197 @@ impl Session {
             "Page.navigate",
             &PageNavigate {
                 url: url.to_string(),
+                referrer: None,
             },
         )
         .await
+    }
+
+    /// Navigate with a custom Referer header
+    pub async fn navigate_with_referrer(&self, url: &str, referrer: &str) -> Result<PageNavigateResult> {
+        self.send(
+            "Page.navigate",
+            &PageNavigate {
+                url: url.to_string(),
+                referrer: Some(referrer.to_string()),
+            },
+        )
+        .await
+    }
+
+    /// Set extra HTTP headers sent with every request on this session.
+    /// Pass an empty map to clear previously set headers.
+    pub async fn set_extra_headers(&self, headers: std::collections::HashMap<String, String>) -> Result<()> {
+        self.send::<_, serde_json::Value>(
+            "Network.setExtraHTTPHeaders",
+            &NetworkSetExtraHTTPHeaders { headers },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Remove all extra HTTP headers previously set via set_extra_headers.
+    pub async fn clear_extra_headers(&self) -> Result<()> {
+        self.set_extra_headers(std::collections::HashMap::new()).await
+    }
+
+    /// Clear all browser cookies for this context.
+    pub async fn clear_all_cookies(&self) -> Result<()> {
+        self.send::<_, serde_json::Value>(
+            "Network.clearBrowserCookies",
+            &NetworkClearBrowserCookies {},
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Bulk-set multiple cookies at once.
+    pub async fn set_cookies(&self, cookies: Vec<NetworkSetCookie>) -> Result<()> {
+        self.send::<_, serde_json::Value>(
+            "Network.setCookies",
+            &NetworkSetCookies { cookies },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Bypass CSP enforcement for the current page.
+    /// Must be called before navigation to take effect.
+    pub async fn set_bypass_csp(&self, enabled: bool) -> Result<()> {
+        self.send::<_, serde_json::Value>(
+            "Page.setBypassCSP",
+            &PageSetBypassCSP { enabled },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Override the User-Agent string (and optionally Accept-Language).
+    pub async fn set_user_agent(&self, user_agent: &str, accept_language: Option<&str>) -> Result<()> {
+        self.send::<_, serde_json::Value>(
+            "Emulation.setUserAgentOverride",
+            &EmulationSetUserAgentOverride {
+                user_agent: user_agent.to_string(),
+                accept_language: accept_language.map(String::from),
+                platform: None,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Ignore TLS certificate errors for this session.
+    pub async fn set_ignore_cert_errors(&self, ignore: bool) -> Result<()> {
+        self.send::<_, serde_json::Value>(
+            "Security.setIgnoreCertificateErrors",
+            &SecuritySetIgnoreCertificateErrors { ignore },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Accept or dismiss a JavaScript dialog (alert / confirm / prompt).
+    /// `prompt_text` is only used for prompt() dialogs.
+    pub async fn handle_dialog(&self, accept: bool, prompt_text: Option<&str>) -> Result<()> {
+        self.send::<_, serde_json::Value>(
+            "Page.handleJavaScriptDialog",
+            &PageHandleJavaScriptDialog {
+                accept,
+                prompt_text: prompt_text.map(String::from),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Enable Fetch domain request interception with URL patterns.
+    /// `patterns` — list of URL/resource-type filters; empty matches everything.
+    pub async fn fetch_enable_interception(
+        &self,
+        patterns: Vec<RequestPattern>,
+        handle_auth: bool,
+    ) -> Result<()> {
+        self.send::<_, serde_json::Value>(
+            "Fetch.enable",
+            &FetchEnableWithPatterns {
+                patterns: if patterns.is_empty() { None } else { Some(patterns) },
+                handle_auth_requests: Some(handle_auth),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Disable Fetch domain interception.
+    pub async fn fetch_disable(&self) -> Result<()> {
+        self.send::<_, serde_json::Value>("Fetch.disable", &FetchDisable {})
+            .await?;
+        Ok(())
+    }
+
+    /// Continue an intercepted request, optionally modifying URL/method/headers/body.
+    pub async fn fetch_continue(
+        &self,
+        request_id: &str,
+        url: Option<&str>,
+        method: Option<&str>,
+        headers: Option<Vec<FetchHeaderEntry>>,
+        post_data: Option<&str>,
+    ) -> Result<()> {
+        self.send::<_, serde_json::Value>(
+            "Fetch.continueRequest",
+            &FetchContinueRequest {
+                request_id: request_id.to_string(),
+                url: url.map(String::from),
+                method: method.map(String::from),
+                post_data: post_data.map(String::from),
+                headers,
+                intercept_response: None,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Fulfill an intercepted request with a synthetic response.
+    /// `body` will be base64-encoded automatically.
+    pub async fn fetch_fulfill(
+        &self,
+        request_id: &str,
+        status_code: u16,
+        headers: Option<Vec<FetchHeaderEntry>>,
+        body: Option<&str>,
+    ) -> Result<()> {
+        let encoded_body = body.map(|b| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(b)
+        });
+        self.send::<_, serde_json::Value>(
+            "Fetch.fulfillRequest",
+            &FetchFulfillRequest {
+                request_id: request_id.to_string(),
+                response_code: status_code,
+                response_headers: headers,
+                body: encoded_body,
+                response_phrase: None,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Abort an intercepted request with a network error.
+    /// `error_reason`: "Aborted", "AccessDenied", "AddressUnreachable", "ConnectionRefused", etc.
+    pub async fn fetch_fail(&self, request_id: &str, error_reason: &str) -> Result<()> {
+        self.send::<_, serde_json::Value>(
+            "Fetch.failRequest",
+            &FetchFailRequest {
+                request_id: request_id.to_string(),
+                error_reason: error_reason.to_string(),
+            },
+        )
+        .await?;
+        Ok(())
     }
 
     /// Reload the page

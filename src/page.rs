@@ -576,6 +576,189 @@ impl Page {
             .delete_cookies(name, url.as_deref(), domain)
             .await
     }
+
+    /// Clear all browser cookies for this context.
+    pub async fn clear_all_cookies(&self) -> Result<()> {
+        self.session.clear_all_cookies().await
+    }
+
+    /// Bulk-import cookies (e.g., restored from a prior dump_storage call).
+    pub async fn set_cookies_bulk(
+        &self,
+        cookies: Vec<crate::cdp::types::NetworkSetCookie>,
+    ) -> Result<()> {
+        self.session.set_cookies(cookies).await
+    }
+
+    /// Set extra HTTP headers sent with every subsequent request from this page.
+    /// Pass an empty map to clear.
+    pub async fn set_extra_headers(&self, headers: HashMap<String, String>) -> Result<()> {
+        self.session.set_extra_headers(headers).await
+    }
+
+    /// Remove all extra HTTP headers set via set_extra_headers.
+    pub async fn clear_extra_headers(&self) -> Result<()> {
+        self.session.clear_extra_headers().await
+    }
+
+    /// Navigate to `url` while sending custom HTTP headers.
+    /// Headers are set before navigation and cleared afterward.
+    pub async fn goto_with_headers(
+        &self,
+        url: &str,
+        headers: HashMap<String, String>,
+    ) -> Result<()> {
+        self.session.set_extra_headers(headers).await?;
+        let result = self.goto(url).await;
+        let _ = self.session.clear_extra_headers().await;
+        result
+    }
+
+    /// Navigate to `url` with a custom Referer header.
+    pub async fn goto_with_referrer(&self, url: &str, referrer: &str) -> Result<()> {
+        let result = self.session.navigate_with_referrer(url, referrer).await?;
+        if let Some(error) = result.error_text {
+            if error != "net::ERR_HTTP_RESPONSE_CODE_FAILURE" {
+                return Err(Error::Navigation(error));
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        Ok(())
+    }
+
+    /// Disable CSP enforcement for the current page.
+    /// Must be called before navigation to take effect.
+    pub async fn set_bypass_csp(&self, enabled: bool) -> Result<()> {
+        self.session.set_bypass_csp(enabled).await
+    }
+
+    /// Override the User-Agent string for this page.
+    pub async fn set_user_agent(&self, user_agent: &str) -> Result<()> {
+        self.session.set_user_agent(user_agent, None).await
+    }
+
+    /// Ignore TLS certificate errors for this session.
+    pub async fn ignore_cert_errors(&self, ignore: bool) -> Result<()> {
+        self.session.set_ignore_cert_errors(ignore).await
+    }
+
+    /// Accept a pending JS dialog (alert / confirm / prompt).
+    /// For prompt() dialogs, provide `prompt_text` to fill the input.
+    pub async fn accept_dialog(&self, prompt_text: Option<&str>) -> Result<()> {
+        self.session.handle_dialog(true, prompt_text).await
+    }
+
+    /// Dismiss a pending JS dialog (cancel / close).
+    pub async fn dismiss_dialog(&self) -> Result<()> {
+        self.session.handle_dialog(false, None).await
+    }
+
+    // ── Storage helpers ───────────────────────────────────────────────────────
+
+    /// Get a localStorage item by key. Returns None if the key doesn't exist.
+    pub async fn local_storage_get(&self, key: &str) -> Result<Option<String>> {
+        let esc = escape_js_string(key);
+        // evaluate returns Err when JS returns null (no value) — map to None
+        match self
+            .evaluate::<Option<String>>(&format!("localStorage.getItem('{esc}')"))
+            .await
+        {
+            Ok(v) => Ok(v),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Set a localStorage item.
+    pub async fn local_storage_set(&self, key: &str, value: &str) -> Result<()> {
+        let ek = escape_js_string(key);
+        let ev = escape_js_string(value);
+        self.execute(&format!("localStorage.setItem('{ek}', '{ev}')"))
+            .await
+    }
+
+    /// Remove a localStorage item.
+    pub async fn local_storage_remove(&self, key: &str) -> Result<()> {
+        let ek = escape_js_string(key);
+        self.execute(&format!("localStorage.removeItem('{ek}')"))
+            .await
+    }
+
+    /// Get all localStorage items as a HashMap.
+    pub async fn local_storage_get_all(&self) -> Result<HashMap<String, String>> {
+        let json: String = self
+            .evaluate(
+                r#"JSON.stringify(Object.fromEntries(
+                    Object.keys(localStorage).map(k => [k, localStorage.getItem(k)])
+                ))"#,
+            )
+            .await
+            .unwrap_or_else(|_| "{}".to_string());
+        Ok(serde_json::from_str(&json).unwrap_or_default())
+    }
+
+    /// Clear all localStorage items.
+    pub async fn local_storage_clear(&self) -> Result<()> {
+        self.execute("localStorage.clear()").await
+    }
+
+    /// Get a sessionStorage item by key. Returns None if the key doesn't exist.
+    pub async fn session_storage_get(&self, key: &str) -> Result<Option<String>> {
+        let esc = escape_js_string(key);
+        match self
+            .evaluate::<Option<String>>(&format!("sessionStorage.getItem('{esc}')"))
+            .await
+        {
+            Ok(v) => Ok(v),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Set a sessionStorage item.
+    pub async fn session_storage_set(&self, key: &str, value: &str) -> Result<()> {
+        let ek = escape_js_string(key);
+        let ev = escape_js_string(value);
+        self.execute(&format!("sessionStorage.setItem('{ek}', '{ev}')"))
+            .await
+    }
+
+    /// Remove a sessionStorage item.
+    pub async fn session_storage_remove(&self, key: &str) -> Result<()> {
+        let ek = escape_js_string(key);
+        self.execute(&format!("sessionStorage.removeItem('{ek}')"))
+            .await
+    }
+
+    /// Get all sessionStorage items as a HashMap.
+    pub async fn session_storage_get_all(&self) -> Result<HashMap<String, String>> {
+        let json: String = self
+            .evaluate(
+                r#"JSON.stringify(Object.fromEntries(
+                    Object.keys(sessionStorage).map(k => [k, sessionStorage.getItem(k)])
+                ))"#,
+            )
+            .await
+            .unwrap_or_else(|_| "{}".to_string());
+        Ok(serde_json::from_str(&json).unwrap_or_default())
+    }
+
+    /// Clear all sessionStorage items.
+    pub async fn session_storage_clear(&self) -> Result<()> {
+        self.execute("sessionStorage.clear()").await
+    }
+
+    /// Dump localStorage, sessionStorage, and cookies into a single JSON value.
+    /// Useful for capturing an authenticated session to restore later.
+    pub async fn dump_storage(&self) -> Result<serde_json::Value> {
+        let local = self.local_storage_get_all().await.unwrap_or_default();
+        let session = self.session_storage_get_all().await.unwrap_or_default();
+        let cookies = self.cookies().await.unwrap_or_default();
+        Ok(serde_json::json!({
+            "localStorage": local,
+            "sessionStorage": session,
+            "cookies": cookies,
+        }))
+    }
+
     /// Wait for an element to appear in the DOM
     pub async fn wait_for(&self, selector: &str, timeout_ms: u64) -> Result<Element<'_>> {
         let start = std::time::Instant::now();

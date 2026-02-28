@@ -86,8 +86,8 @@ pub struct TabInfo {
 pub struct Browser {
     connection: Connection,
     config: Arc<StealthConfig>,
-    /// User data directory (cleaned up on close)
-    user_data_dir: PathBuf,
+    /// User data directory (cleaned up on close; None when connecting to existing instance)
+    user_data_dir: Option<PathBuf>,
     /// Evasion script (cached)
     evasion_script: String,
 }
@@ -155,7 +155,27 @@ impl Browser {
         Ok(Self {
             connection,
             config,
-            user_data_dir,
+            user_data_dir: Some(user_data_dir),
+            evasion_script,
+        })
+    }
+
+
+    /// Connect to an existing Chrome instance at the given WebSocket CDP URL.
+    /// Obtain the URL from `curl http://localhost:9222/json/version`.
+    /// Does not patch the binary or manage the Chrome process.
+    /// Evasion scripts are still injected into new pages.
+    pub async fn connect(ws_url: &str) -> Result<Self> {
+        let config = Arc::new(StealthConfig::default());
+        let transport = crate::cdp::transport::Transport::connect(ws_url, config.cdp_timeout)?;
+        let connection = Connection::new(transport);
+        let version = connection.version().await?;
+        tracing::info!("Connected to Chrome: {}", version.product);
+        let evasion_script = build_evasion_script(&config);
+        Ok(Self {
+            connection,
+            config,
+            user_data_dir: None,
             evasion_script,
         })
     }
@@ -272,7 +292,9 @@ impl Browser {
         self.connection.close().await?;
 
         // Clean up user data directory
-        let _ = std::fs::remove_dir_all(&self.user_data_dir);
+        if let Some(ref dir) = self.user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
 
         Ok(())
     }
@@ -282,6 +304,8 @@ impl Drop for Browser {
     fn drop(&mut self) {
         // Best-effort cleanup of user data directory if close() wasn't called.
         // The Transport's Drop impl handles killing the Chrome process.
-        let _ = std::fs::remove_dir_all(&self.user_data_dir);
+        if let Some(ref dir) = self.user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

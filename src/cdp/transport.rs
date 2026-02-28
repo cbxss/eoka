@@ -69,7 +69,11 @@ fn write_ws_frame(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// WebSocket frame writer with explicit opcode
-fn write_ws_frame_with_opcode(stream: &mut TcpStream, opcode: u8, data: &[u8]) -> std::io::Result<()> {
+fn write_ws_frame_with_opcode(
+    stream: &mut TcpStream,
+    opcode: u8,
+    data: &[u8],
+) -> std::io::Result<()> {
     use std::io::Write;
 
     let len = data.len();
@@ -93,7 +97,12 @@ fn write_ws_frame_with_opcode(stream: &mut TcpStream, opcode: u8, data: &[u8]) -
     }
 
     // Random masking key per frame (RFC 6455 compliance)
-    let mask: [u8; 4] = [fastrand::u8(..), fastrand::u8(..), fastrand::u8(..), fastrand::u8(..)];
+    let mask: [u8; 4] = [
+        fastrand::u8(..),
+        fastrand::u8(..),
+        fastrand::u8(..),
+        fastrand::u8(..),
+    ];
     frame.extend_from_slice(&mask);
 
     // Masked payload
@@ -225,14 +234,13 @@ impl Transport {
             .map_err(|e| Error::transport_io("Failed to connect to Chrome", e))?;
 
         let path = format!("/{}", url.split_once('/').map(|(_, p)| p).unwrap_or(""));
-        let key = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            {
-                let mut buf = [0u8; 16];
-                for b in buf.iter_mut() { *b = fastrand::u8(..); }
-                buf
-            },
-        );
+        let key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, {
+            let mut buf = [0u8; 16];
+            for b in buf.iter_mut() {
+                *b = fastrand::u8(..);
+            }
+            buf
+        });
 
         let handshake = format!(
             "GET {} HTTP/1.1\r\n\
@@ -507,7 +515,9 @@ impl Transport {
                 }
                 ws::OPCODE_PING => {
                     // RFC 6455 §5.5.3: Pong must echo the ping's payload
-                    if let Err(e) = write_ws_frame_with_opcode(&mut stream, ws::OPCODE_PONG, &payload) {
+                    if let Err(e) =
+                        write_ws_frame_with_opcode(&mut stream, ws::OPCODE_PONG, &payload)
+                    {
                         exit_reason = format!("Pong write failed: {}", e);
                         break;
                     }

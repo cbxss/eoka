@@ -2,7 +2,6 @@
 //!
 //! Generates realistic, randomized browser fingerprints.
 
-
 /// Chrome versions (recent, realistic)
 const CHROME_VERSIONS: &[&str] = &[
     "120.0.0.0",
@@ -122,17 +121,28 @@ impl Fingerprint {
 
         let (webgl_vendor, webgl_renderer) = match platform {
             Platform::MacOS => ("Google Inc. (Apple)", *choose(WEBGL_RENDERERS_MAC)),
-            Platform::Windows => ("Google Inc. (NVIDIA Corporation)", *choose(WEBGL_RENDERERS_WINDOWS)),
+            Platform::Windows => (
+                "Google Inc. (NVIDIA Corporation)",
+                *choose(WEBGL_RENDERERS_WINDOWS),
+            ),
         };
 
         let hardware_concurrency = *choose(&[4, 8, 10, 12, 16]);
         let device_memory = *choose(&[8, 16, 32]);
 
         let timezones = [
-            "America/New_York", "America/Chicago", "America/Los_Angeles",
-            "America/Sao_Paulo", "Europe/London", "Europe/Paris",
-            "Europe/Berlin", "Europe/Moscow", "Asia/Tokyo",
-            "Asia/Shanghai", "Asia/Kolkata", "Australia/Sydney",
+            "America/New_York",
+            "America/Chicago",
+            "America/Los_Angeles",
+            "America/Sao_Paulo",
+            "Europe/London",
+            "Europe/Paris",
+            "Europe/Berlin",
+            "Europe/Moscow",
+            "Asia/Tokyo",
+            "Asia/Shanghai",
+            "Asia/Kolkata",
+            "Australia/Sydney",
         ];
 
         Self {

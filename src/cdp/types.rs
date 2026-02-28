@@ -846,4 +846,3 @@ pub struct FetchFailRequest {
     /// CDP NetworkErrorReason, e.g. "Aborted", "AccessDenied", "AddressUnreachable"
     pub error_reason: String,
 }
-

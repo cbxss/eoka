@@ -735,9 +735,10 @@ const COMMON_TIMEZONES: &[&str] = &[
 /// Build the complete evasion script based on config
 pub fn build_evasion_script(config: &StealthConfig) -> String {
     // Resolve timezone: use config value, or pick a random common one
-    let timezone = config.timezone.clone().unwrap_or_else(|| {
-        COMMON_TIMEZONES[fastrand::usize(..COMMON_TIMEZONES.len())].to_string()
-    });
+    let timezone = config
+        .timezone
+        .clone()
+        .unwrap_or_else(|| COMMON_TIMEZONES[fastrand::usize(..COMMON_TIMEZONES.len())].to_string());
 
     let mut scripts = vec![
         WEBDRIVER_EVASION,

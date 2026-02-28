@@ -570,7 +570,11 @@ impl Page {
         // Propagate URL fetch errors — a None url causes Chrome to silently
         // reject the cookie, which is worse than failing loudly.
         let url = self.url().await?;
-        let url_ref = if url == "about:blank" { None } else { Some(url.as_str()) };
+        let url_ref = if url == "about:blank" {
+            None
+        } else {
+            Some(url.as_str())
+        };
         let success = self
             .session
             .set_cookie(name, value, url_ref, domain, path)
@@ -585,10 +589,12 @@ impl Page {
     /// Delete a cookie
     pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
         let url = self.url().await?;
-        let url_ref = if url == "about:blank" { None } else { Some(url.as_str()) };
-        self.session
-            .delete_cookies(name, url_ref, domain)
-            .await
+        let url_ref = if url == "about:blank" {
+            None
+        } else {
+            Some(url.as_str())
+        };
+        self.session.delete_cookies(name, url_ref, domain).await
     }
 
     /// Clear all browser cookies for this context.
@@ -798,7 +804,8 @@ impl Page {
             timeout_ms,
             format!("Element '{}' not found within {}ms", selector, timeout_ms),
             || async { self.find(selector).await.ok() },
-        ).await
+        )
+        .await
     }
 
     /// Wait for an element to be visible and clickable
@@ -814,18 +821,27 @@ impl Page {
                 }
                 None
             },
-        ).await
+        )
+        .await
     }
 
     /// Wait for an element to disappear
     pub async fn wait_for_hidden(&self, selector: &str, timeout_ms: u64) -> Result<()> {
         self.poll_until(
             timeout_ms,
-            format!("Element '{}' still visible after {}ms", selector, timeout_ms),
+            format!(
+                "Element '{}' still visible after {}ms",
+                selector, timeout_ms
+            ),
             || async {
-                if self.find(selector).await.is_err() { Some(()) } else { None }
+                if self.find(selector).await.is_err() {
+                    Some(())
+                } else {
+                    None
+                }
             },
-        ).await
+        )
+        .await
     }
 
     /// Wait for a fixed duration
@@ -837,9 +853,13 @@ impl Page {
     pub async fn wait_for_text(&self, text: &str, timeout_ms: u64) -> Result<Element<'_>> {
         self.poll_until(
             timeout_ms,
-            format!("Element with text '{}' not found within {}ms", text, timeout_ms),
+            format!(
+                "Element with text '{}' not found within {}ms",
+                text, timeout_ms
+            ),
             || async { self.find_by_text(text).await.ok() },
-        ).await
+        )
+        .await
     }
 
     /// Wait for the URL to contain a specific string
@@ -849,11 +869,14 @@ impl Page {
             format!("URL did not contain '{}' within {}ms", pattern, timeout_ms),
             || async {
                 if let Ok(url) = self.url().await {
-                    if url.contains(pattern) { return Some(()); }
+                    if url.contains(pattern) {
+                        return Some(());
+                    }
                 }
                 None
             },
-        ).await
+        )
+        .await
     }
 
     /// Wait for URL to change from current URL
@@ -861,14 +884,20 @@ impl Page {
         let original_url = self.url().await?;
         self.poll_until(
             timeout_ms,
-            format!("URL did not change from '{}' within {}ms", original_url, timeout_ms),
+            format!(
+                "URL did not change from '{}' within {}ms",
+                original_url, timeout_ms
+            ),
             || async {
                 if let Ok(url) = self.url().await {
-                    if url != original_url { return Some(url); }
+                    if url != original_url {
+                        return Some(url);
+                    }
                 }
                 None
             },
-        ).await
+        )
+        .await
     }
     /// Enable network request capture
     /// NOTE: This enables Network.enable which may be slightly detectable by advanced anti-bot
@@ -915,9 +944,13 @@ impl Page {
     pub async fn wait_for_any(&self, selectors: &[&str], timeout_ms: u64) -> Result<Element<'_>> {
         self.poll_until(
             timeout_ms,
-            format!("None of selectors found within {}ms: {:?}", timeout_ms, selectors),
+            format!(
+                "None of selectors found within {}ms: {:?}",
+                timeout_ms, selectors
+            ),
             || async { self.find_any(selectors).await.ok() },
-        ).await
+        )
+        .await
     }
     /// Wait for network to become idle (no pending XHR/fetch for `idle_time_ms`)
     pub async fn wait_for_network_idle(&self, idle_time_ms: u64, timeout_ms: u64) -> Result<()> {
@@ -973,10 +1006,7 @@ impl Page {
             // Re-install interceptors if the page navigated (counter will be undefined
             // on the new document). This is cheap — the guard inside check_idle_js
             // skips setup when __eoka_pending_requests is already defined.
-            let pending: i32 = self
-                .evaluate_sync(check_idle_js)
-                .await
-                .unwrap_or(0);
+            let pending: i32 = self.evaluate_sync(check_idle_js).await.unwrap_or(0);
 
             if pending == 0 {
                 match idle_start {
@@ -995,7 +1025,8 @@ impl Page {
             if start.elapsed() > timeout {
                 tracing::warn!(
                     "wait_for_network_idle timed out after {}ms with {} pending request(s)",
-                    timeout_ms, pending
+                    timeout_ms,
+                    pending
                 );
                 return Err(Error::Timeout(format!(
                     "Network not idle after {}ms ({} pending requests)",
@@ -1217,9 +1248,13 @@ impl Page {
             ..Default::default()
         };
 
-        self.session.dispatch_key_event_full(make_event(KeyEventType::KeyDown)).await?;
+        self.session
+            .dispatch_key_event_full(make_event(KeyEventType::KeyDown))
+            .await?;
         tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
-        self.session.dispatch_key_event_full(make_event(KeyEventType::KeyUp)).await
+        self.session
+            .dispatch_key_event_full(make_event(KeyEventType::KeyUp))
+            .await
     }
 
     /// Platform-aware select all (Cmd+A on Mac, Ctrl+A elsewhere)

@@ -296,9 +296,8 @@ impl Transport {
 
         // If proxy auth is configured, share the writer so auth responses
         // don't race with command writes on the TCP stream.
-        let proxy_auth_writer = proxy_auth.map(|(username, password)| {
-            (username, password, Arc::clone(&writer))
-        });
+        let proxy_auth_writer =
+            proxy_auth.map(|(username, password)| (username, password, Arc::clone(&writer)));
 
         let pending: Arc<PendingMap> = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -371,7 +370,9 @@ impl Transport {
                         if n_pending > 0 {
                             tracing::warn!(
                                 "WebSocket read timeout ({}/{}) with {} pending request(s)",
-                                consecutive_timeouts, MAX_CONSECUTIVE_TIMEOUTS, n_pending
+                                consecutive_timeouts,
+                                MAX_CONSECUTIVE_TIMEOUTS,
+                                n_pending
                             );
                         }
                         if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
@@ -514,7 +515,8 @@ impl Transport {
         if n > 0 {
             tracing::error!(
                 "Reader loop exiting ({}), failing {} pending request(s)",
-                exit_reason, n
+                exit_reason,
+                n
             );
             for (_id, sender) in pending_guard.drain() {
                 let _ = sender.send(Err(Error::transport(format!(

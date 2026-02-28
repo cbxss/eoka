@@ -146,12 +146,23 @@ impl Fingerprint {
             timezone: {
                 use rand::prelude::IndexedRandom;
                 let timezones = [
-                    "America/New_York", "America/Chicago", "America/Los_Angeles",
-                    "America/Sao_Paulo", "Europe/London", "Europe/Paris",
-                    "Europe/Berlin", "Europe/Moscow", "Asia/Tokyo",
-                    "Asia/Shanghai", "Asia/Kolkata", "Australia/Sydney",
+                    "America/New_York",
+                    "America/Chicago",
+                    "America/Los_Angeles",
+                    "America/Sao_Paulo",
+                    "Europe/London",
+                    "Europe/Paris",
+                    "Europe/Berlin",
+                    "Europe/Moscow",
+                    "Asia/Tokyo",
+                    "Asia/Shanghai",
+                    "Asia/Kolkata",
+                    "Australia/Sydney",
                 ];
-                timezones.choose(&mut rng).unwrap_or(&"America/New_York").to_string()
+                timezones
+                    .choose(&mut rng)
+                    .unwrap_or(&"America/New_York")
+                    .to_string()
             },
             languages: vec!["en-US".to_string(), "en".to_string()],
             webgl_vendor: webgl_vendor.to_string(),

@@ -87,8 +87,7 @@ impl BrowserSession {
             .filter(|c| {
                 let cookie_domain = c.domain.trim_start_matches('.');
                 // Exact match or subdomain match with dot boundary
-                domain == cookie_domain
-                    || domain.ends_with(&format!(".{}", cookie_domain))
+                domain == cookie_domain || domain.ends_with(&format!(".{}", cookie_domain))
             })
             .collect()
     }
@@ -100,7 +99,8 @@ impl BrowserSession {
             .map(|c| {
                 // RFC 6265 §4.1.1: cookie-value must not contain semicolons,
                 // commas, or whitespace. Percent-encode problematic chars.
-                let safe_value = c.value
+                let safe_value = c
+                    .value
                     .replace('%', "%25")
                     .replace(';', "%3B")
                     .replace(',', "%2C")

@@ -94,7 +94,10 @@ fn get_pattern_matcher() -> Result<&'static AhoCorasick> {
     }
     let patterns: Vec<&[u8]> = PATCH_PATTERNS.iter().map(|p| p.pattern).collect();
     let ac = AhoCorasick::new(&patterns).map_err(|e| {
-        Error::patching("init", format!("Failed to build Aho-Corasick automaton: {}", e))
+        Error::patching(
+            "init",
+            format!("Failed to build Aho-Corasick automaton: {}", e),
+        )
     })?;
     Ok(PATTERN_MATCHER.get_or_init(|| ac))
 }

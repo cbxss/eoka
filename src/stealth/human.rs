@@ -49,7 +49,12 @@ impl HumanSpeed {
 }
 
 fn random_range(min: u64, max: u64) -> u64 {
-    debug_assert!(min < max, "random_range: min ({}) must be less than max ({})", min, max);
+    debug_assert!(
+        min < max,
+        "random_range: min ({}) must be less than max ({})",
+        min,
+        max
+    );
     if min >= max {
         return min;
     }
@@ -57,7 +62,12 @@ fn random_range(min: u64, max: u64) -> u64 {
 }
 
 fn random_f64_range(min: f64, max: f64) -> f64 {
-    debug_assert!(min < max, "random_f64_range: min ({}) must be less than max ({})", min, max);
+    debug_assert!(
+        min < max,
+        "random_f64_range: min ({}) must be less than max ({})",
+        min,
+        max
+    );
     if min >= max {
         return min;
     }

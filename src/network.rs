@@ -132,11 +132,18 @@ impl NetworkWatcher {
                 // Evict the entry with the lowest timestamp (oldest request)
                 if let Some(oldest_id) = requests
                     .iter()
-                    .min_by(|a, b| a.1.timestamp.partial_cmp(&b.1.timestamp).unwrap_or(std::cmp::Ordering::Equal))
+                    .min_by(|a, b| {
+                        a.1.timestamp
+                            .partial_cmp(&b.1.timestamp)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .map(|(id, _)| id.clone())
                 {
                     requests.remove(&oldest_id);
-                    tracing::debug!("Evicted oldest in-flight request (cap={})", MAX_INFLIGHT_REQUESTS);
+                    tracing::debug!(
+                        "Evicted oldest in-flight request (cap={})",
+                        MAX_INFLIGHT_REQUESTS
+                    );
                 }
             }
             requests.insert(event.request_id.clone(), request.clone());

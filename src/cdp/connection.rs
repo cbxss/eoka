@@ -182,7 +182,11 @@ impl Session {
     }
 
     /// Navigate with a custom Referer header
-    pub async fn navigate_with_referrer(&self, url: &str, referrer: &str) -> Result<PageNavigateResult> {
+    pub async fn navigate_with_referrer(
+        &self,
+        url: &str,
+        referrer: &str,
+    ) -> Result<PageNavigateResult> {
         self.send(
             "Page.navigate",
             &PageNavigate {
@@ -195,7 +199,10 @@ impl Session {
 
     /// Set extra HTTP headers sent with every request on this session.
     /// Pass an empty map to clear previously set headers.
-    pub async fn set_extra_headers(&self, headers: std::collections::HashMap<String, String>) -> Result<()> {
+    pub async fn set_extra_headers(
+        &self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
         self.send::<_, serde_json::Value>(
             "Network.setExtraHTTPHeaders",
             &NetworkSetExtraHTTPHeaders { headers },
@@ -206,7 +213,8 @@ impl Session {
 
     /// Remove all extra HTTP headers previously set via set_extra_headers.
     pub async fn clear_extra_headers(&self) -> Result<()> {
-        self.set_extra_headers(std::collections::HashMap::new()).await
+        self.set_extra_headers(std::collections::HashMap::new())
+            .await
     }
 
     /// Clear all browser cookies for this context.
@@ -221,27 +229,25 @@ impl Session {
 
     /// Bulk-set multiple cookies at once.
     pub async fn set_cookies(&self, cookies: Vec<NetworkSetCookie>) -> Result<()> {
-        self.send::<_, serde_json::Value>(
-            "Network.setCookies",
-            &NetworkSetCookies { cookies },
-        )
-        .await?;
+        self.send::<_, serde_json::Value>("Network.setCookies", &NetworkSetCookies { cookies })
+            .await?;
         Ok(())
     }
 
     /// Bypass CSP enforcement for the current page.
     /// Must be called before navigation to take effect.
     pub async fn set_bypass_csp(&self, enabled: bool) -> Result<()> {
-        self.send::<_, serde_json::Value>(
-            "Page.setBypassCSP",
-            &PageSetBypassCSP { enabled },
-        )
-        .await?;
+        self.send::<_, serde_json::Value>("Page.setBypassCSP", &PageSetBypassCSP { enabled })
+            .await?;
         Ok(())
     }
 
     /// Override the User-Agent string (and optionally Accept-Language).
-    pub async fn set_user_agent(&self, user_agent: &str, accept_language: Option<&str>) -> Result<()> {
+    pub async fn set_user_agent(
+        &self,
+        user_agent: &str,
+        accept_language: Option<&str>,
+    ) -> Result<()> {
         self.send::<_, serde_json::Value>(
             "Emulation.setUserAgentOverride",
             &EmulationSetUserAgentOverride {
@@ -288,7 +294,11 @@ impl Session {
         self.send::<_, serde_json::Value>(
             "Fetch.enable",
             &FetchEnableWithPatterns {
-                patterns: if patterns.is_empty() { None } else { Some(patterns) },
+                patterns: if patterns.is_empty() {
+                    None
+                } else {
+                    Some(patterns)
+                },
                 handle_auth_requests: Some(handle_auth),
             },
         )

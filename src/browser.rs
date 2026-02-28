@@ -160,7 +160,6 @@ impl Browser {
         })
     }
 
-
     /// Connect to an existing Chrome instance at the given WebSocket CDP URL.
     /// Obtain the URL from `curl http://localhost:9222/json/version`.
     /// Does not patch the binary or manage the Chrome process.

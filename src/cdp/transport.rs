@@ -307,7 +307,6 @@ impl Transport {
         })
     }
 
-
     /// Connect to an existing Chrome instance at the given WebSocket URL.
     /// Does not manage a Chrome process — caller owns the browser lifecycle.
     pub fn connect(ws_url: &str, cdp_timeout_secs: u64) -> Result<Self> {
@@ -343,7 +342,9 @@ impl Transport {
                 .fill_buf()
                 .map_err(|e| Error::transport_io("Handshake read failed", e))?;
             if available.is_empty() {
-                return Err(Error::transport("Connection closed during WebSocket handshake"));
+                return Err(Error::transport(
+                    "Connection closed during WebSocket handshake",
+                ));
             }
             let len = available.len();
             response_buf.extend_from_slice(available);

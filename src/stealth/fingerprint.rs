@@ -2,8 +2,6 @@
 //!
 //! Generates realistic, randomized browser fingerprints.
 
-use rand::prelude::IndexedRandom;
-use rand::RngExt;
 
 /// Chrome versions (recent, realistic)
 const CHROME_VERSIONS: &[&str] = &[
@@ -65,20 +63,23 @@ const SCREEN_RESOLUTIONS: &[(u32, u32)] = &[
 ];
 
 /// Generate a random realistic user agent
-pub fn random_user_agent() -> String {
-    let mut rng = rand::rng();
+/// Pick a random element from a slice
+fn choose<T>(slice: &[T]) -> &T {
+    &slice[fastrand::usize(..slice.len())]
+}
 
-    let chrome_version = CHROME_VERSIONS.choose(&mut rng).unwrap();
+pub fn random_user_agent() -> String {
+    let chrome_version = choose(CHROME_VERSIONS);
 
     // 30% Mac, 70% Windows (matches real internet traffic)
-    if rng.random_bool(0.3) {
-        let macos = MACOS_VERSIONS.choose(&mut rng).unwrap();
+    if fastrand::f64() < 0.3 {
+        let macos = choose(MACOS_VERSIONS);
         format!(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X {}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{} Safari/537.36",
             macos, chrome_version
         )
     } else {
-        let windows = WINDOWS_VERSIONS.choose(&mut rng).unwrap();
+        let windows = choose(WINDOWS_VERSIONS);
         format!(
             "Mozilla/5.0 (Windows NT {}; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{} Safari/537.36",
             windows, chrome_version
@@ -111,29 +112,28 @@ pub enum Platform {
 impl Fingerprint {
     /// Generate a random consistent fingerprint
     pub fn random() -> Self {
-        let mut rng = rand::rng();
-
-        let platform = if rng.random_bool(0.3) {
+        let platform = if fastrand::f64() < 0.3 {
             Platform::MacOS
         } else {
             Platform::Windows
         };
 
-        let (screen_width, screen_height) = *SCREEN_RESOLUTIONS.choose(&mut rng).unwrap();
+        let (screen_width, screen_height) = *choose(SCREEN_RESOLUTIONS);
 
         let (webgl_vendor, webgl_renderer) = match platform {
-            Platform::MacOS => {
-                let renderer = WEBGL_RENDERERS_MAC.choose(&mut rng).unwrap();
-                ("Google Inc. (Apple)", *renderer)
-            }
-            Platform::Windows => {
-                let renderer = WEBGL_RENDERERS_WINDOWS.choose(&mut rng).unwrap();
-                ("Google Inc. (NVIDIA Corporation)", *renderer)
-            }
+            Platform::MacOS => ("Google Inc. (Apple)", *choose(WEBGL_RENDERERS_MAC)),
+            Platform::Windows => ("Google Inc. (NVIDIA Corporation)", *choose(WEBGL_RENDERERS_WINDOWS)),
         };
 
-        let hardware_concurrency = *[4, 8, 10, 12, 16].choose(&mut rng).unwrap();
-        let device_memory = *[8, 16, 32].choose(&mut rng).unwrap();
+        let hardware_concurrency = *choose(&[4, 8, 10, 12, 16]);
+        let device_memory = *choose(&[8, 16, 32]);
+
+        let timezones = [
+            "America/New_York", "America/Chicago", "America/Los_Angeles",
+            "America/Sao_Paulo", "Europe/London", "Europe/Paris",
+            "Europe/Berlin", "Europe/Moscow", "Asia/Tokyo",
+            "Asia/Shanghai", "Asia/Kolkata", "Australia/Sydney",
+        ];
 
         Self {
             user_agent: random_user_agent(),
@@ -143,27 +143,7 @@ impl Fingerprint {
             color_depth: 24,
             hardware_concurrency,
             device_memory,
-            timezone: {
-                use rand::prelude::IndexedRandom;
-                let timezones = [
-                    "America/New_York",
-                    "America/Chicago",
-                    "America/Los_Angeles",
-                    "America/Sao_Paulo",
-                    "Europe/London",
-                    "Europe/Paris",
-                    "Europe/Berlin",
-                    "Europe/Moscow",
-                    "Asia/Tokyo",
-                    "Asia/Shanghai",
-                    "Asia/Kolkata",
-                    "Australia/Sydney",
-                ];
-                timezones
-                    .choose(&mut rng)
-                    .unwrap_or(&"America/New_York")
-                    .to_string()
-            },
+            timezone: choose(&timezones).to_string(),
             languages: vec!["en-US".to_string(), "en".to_string()],
             webgl_vendor: webgl_vendor.to_string(),
             webgl_renderer: webgl_renderer.to_string(),

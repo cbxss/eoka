@@ -206,7 +206,7 @@ Minimal by design:
 - `serde`/`serde_json` - serialization
 - `aho-corasick` - binary patching
 - `memmap2` - memory-mapped file I/O
-- `rand` - human simulation randomness
+- `fastrand` - human simulation randomness
 - `base64` - screenshot/response encoding
 - `thiserror` - error types
 - `tracing` - logging

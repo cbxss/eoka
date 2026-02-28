@@ -706,24 +706,6 @@ pub mod modifiers {
 
 // === Target Discovery (for multi-tab) ===
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TargetSetDiscoverTargets {
-    pub discover: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TargetTargetCreatedEvent {
-    pub target_info: TargetInfo,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TargetTargetDestroyedEvent {
-    pub target_id: String,
-}
-
 // === Fetch domain (proxy authentication) ===
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -785,20 +767,6 @@ pub struct PageHandleJavaScriptDialog {
     pub accept: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_text: Option<String>,
-}
-
-/// Event fired when a JS alert/confirm/prompt opens (Page domain must be enabled)
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PageJavascriptDialogOpeningEvent {
-    pub url: String,
-    pub message: String,
-    /// "alert" | "confirm" | "prompt" | "beforeunload"
-    pub r#type: String,
-    #[serde(default)]
-    pub has_browser_handler: bool,
-    #[serde(default)]
-    pub default_prompt: Option<String>,
 }
 
 /// A URL pattern used to filter which requests Fetch.enable intercepts
@@ -879,18 +847,3 @@ pub struct FetchFailRequest {
     pub error_reason: String,
 }
 
-/// Event fired by the Fetch domain when a request is paused for interception
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FetchRequestPausedEvent {
-    pub request_id: String,
-    pub request: NetworkRequest,
-    pub frame_id: String,
-    pub resource_type: String,
-    #[serde(default)]
-    pub network_id: Option<String>,
-    #[serde(default)]
-    pub response_status_code: Option<u16>,
-    #[serde(default)]
-    pub response_headers: Option<Vec<FetchHeaderEntry>>,
-}

@@ -5,19 +5,12 @@
 
 use aho_corasick::{AhoCorasick, Match};
 use memmap2::MmapMut;
-use rand::RngExt;
-use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::error::{Error, Result};
-
-// Thread-local RNG
-thread_local! {
-    static RNG: RefCell<rand::rngs::ThreadRng> = RefCell::new(rand::rng());
-}
 
 /// Patch pattern with replacement strategy
 #[derive(Clone)]
@@ -662,19 +655,16 @@ impl ChromePatcher {
 }
 
 fn random_string(len: usize) -> String {
-    RNG.with(|rng| {
-        let mut rng = rng.borrow_mut();
-        (0..len)
-            .map(|_| {
-                let idx = rng.random_range(0..36u8);
-                if idx < 10 {
-                    (b'0' + idx) as char
-                } else {
-                    (b'a' + idx - 10) as char
-                }
-            })
-            .collect()
-    })
+    (0..len)
+        .map(|_| {
+            let idx = fastrand::u8(0..36);
+            if idx < 10 {
+                (b'0' + idx) as char
+            } else {
+                (b'a' + idx - 10) as char
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

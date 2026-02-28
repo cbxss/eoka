@@ -736,12 +736,7 @@ const COMMON_TIMEZONES: &[&str] = &[
 pub fn build_evasion_script(config: &StealthConfig) -> String {
     // Resolve timezone: use config value, or pick a random common one
     let timezone = config.timezone.clone().unwrap_or_else(|| {
-        use rand::prelude::IndexedRandom;
-        let mut rng = rand::rng();
-        COMMON_TIMEZONES
-            .choose(&mut rng)
-            .unwrap_or(&"America/New_York")
-            .to_string()
+        COMMON_TIMEZONES[fastrand::usize(..COMMON_TIMEZONES.len())].to_string()
     });
 
     let mut scripts = vec![

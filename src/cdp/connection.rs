@@ -414,6 +414,9 @@ impl Session {
         let history: PageGetNavigationHistoryResult = self
             .send("Page.getNavigationHistory", &PageGetNavigationHistory {})
             .await?;
+        if history.current_index < 0 {
+            return Ok(());
+        }
         let next = history.current_index as usize + 1;
         if let Some(entry) = history.entries.get(next) {
             self.send::<_, serde_json::Value>(

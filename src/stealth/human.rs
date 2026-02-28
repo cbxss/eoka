@@ -3,7 +3,6 @@
 //! Simulates realistic mouse movements and typing patterns to avoid
 //! behavior-based bot detection.
 
-use rand::RngExt;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -58,7 +57,7 @@ fn random_range(min: u64, max: u64) -> u64 {
     if min >= max {
         return min;
     }
-    rand::rng().random_range(min..max)
+    fastrand::u64(min..max)
 }
 
 fn random_f64_range(min: f64, max: f64) -> f64 {
@@ -71,11 +70,11 @@ fn random_f64_range(min: f64, max: f64) -> f64 {
     if min >= max {
         return min;
     }
-    rand::rng().random_range(min..max)
+    min + fastrand::f64() * (max - min)
 }
 
 fn random_bool(probability: f64) -> bool {
-    rand::rng().random_bool(probability)
+    fastrand::f64() < probability
 }
 
 /// Point type

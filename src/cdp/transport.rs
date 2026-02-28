@@ -63,15 +63,20 @@ mod ws {
     pub const OPCODE_PONG: u8 = 0xA;
 }
 
-/// Simple WebSocket frame writer
+/// Simple WebSocket frame writer (text opcode)
 fn write_ws_frame(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
+    write_ws_frame_with_opcode(stream, ws::OPCODE_TEXT, data)
+}
+
+/// WebSocket frame writer with explicit opcode
+fn write_ws_frame_with_opcode(stream: &mut TcpStream, opcode: u8, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
     let len = data.len();
     let mut frame = Vec::with_capacity(14 + len);
 
-    // FIN + text opcode
-    frame.push(0x80 | ws::OPCODE_TEXT);
+    // FIN + opcode
+    frame.push(0x80 | opcode);
 
     // Mask bit set (client must mask), then length
     if len < 126 {
@@ -88,7 +93,7 @@ fn write_ws_frame(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
     }
 
     // Random masking key per frame (RFC 6455 compliance)
-    let mask: [u8; 4] = rand::random();
+    let mask: [u8; 4] = [fastrand::u8(..), fastrand::u8(..), fastrand::u8(..), fastrand::u8(..)];
     frame.extend_from_slice(&mask);
 
     // Masked payload
@@ -119,12 +124,14 @@ fn read_ws_frame(stream: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
     } else if len == 127 {
         let mut ext = [0u8; 8];
         stream.read_exact(&mut ext)?;
+        const MAX_FRAME_LEN: usize = 256 * 1024 * 1024;
         len = 0;
         for byte in ext.iter() {
-            // Guard against overflow: cap at 256 MB to prevent panic on
-            // malformed frames. Real CDP messages should never be this large.
-            const MAX_FRAME_LEN: usize = 256 * 1024 * 1024;
-            len = (len << 8) | (*byte as usize);
+            // Use checked_shl to prevent silent overflow on 32-bit platforms
+            len = match len.checked_shl(8) {
+                Some(shifted) => shifted | (*byte as usize),
+                None => MAX_FRAME_LEN + 1, // force the size check below to trigger
+            };
             if len > MAX_FRAME_LEN {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -220,7 +227,11 @@ impl Transport {
         let path = format!("/{}", url.split_once('/').map(|(_, p)| p).unwrap_or(""));
         let key = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
-            rand::random::<[u8; 16]>(),
+            {
+                let mut buf = [0u8; 16];
+                for b in buf.iter_mut() { *b = fastrand::u8(..); }
+                buf
+            },
         );
 
         let handshake = format!(
@@ -495,9 +506,11 @@ impl Transport {
                     }
                 }
                 ws::OPCODE_PING => {
-                    // Respond with pong
-                    let frame = vec![0x80 | ws::OPCODE_PONG, 0x80, 0, 0, 0, 0];
-                    let _ = std::io::Write::write_all(&mut stream, &frame);
+                    // RFC 6455 §5.5.3: Pong must echo the ping's payload
+                    if let Err(e) = write_ws_frame_with_opcode(&mut stream, ws::OPCODE_PONG, &payload) {
+                        exit_reason = format!("Pong write failed: {}", e);
+                        break;
+                    }
                 }
                 ws::OPCODE_CLOSE => {
                     exit_reason = "WebSocket closed by server".to_string();
@@ -556,14 +569,9 @@ impl Transport {
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        // Create response channel
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().unwrap();
-            pending.insert(id, tx);
-        }
-
-        // Build message
+        // Build and serialize BEFORE inserting into the pending map.
+        // This way, if serialization or write fails, we don't leak a
+        // pending oneshot channel that never gets a response.
         let mut msg = json!({
             "id": id,
             "method": method,
@@ -572,13 +580,23 @@ impl Transport {
         if let Some(sid) = session_id {
             msg["sessionId"] = json!(sid);
         }
-
         let data = serde_json::to_string(&msg)?;
 
+        // Create response channel and register it
+        let (tx, rx) = oneshot::channel();
         {
+            let mut pending = self.pending.lock().unwrap();
+            pending.insert(id, tx);
+        }
+
+        // Write to WebSocket — clean up pending entry on failure
+        if let Err(e) = {
             let mut writer = self.writer.lock().unwrap();
             write_ws_frame(&mut writer, data.as_bytes())
-                .map_err(|e| Error::transport_io("WebSocket write failed", e))?;
+        } {
+            let mut pending = self.pending.lock().unwrap();
+            pending.remove(&id);
+            return Err(Error::transport_io("WebSocket write failed", e));
         }
 
         tracing::trace!("Sent CDP command: {} (id={})", method, id);

@@ -47,19 +47,29 @@ src/
 ### Page - Finding Elements
 - `page.find(selector)` / `page.find_all(selector)` - By CSS selector
 - `page.find_by_text(text)` - By visible text (prioritizes links/buttons)
+- `page.find_by_text_match(text, TextMatch)` - With match strategy (Exact/Contains/StartsWith/EndsWith)
 - `page.find_all_by_text(text)` - All elements with text
 - `page.find_any(&[selectors])` - First matching selector
 - `page.exists(selector)` / `page.text_exists(text)` - Check existence
 
+### Page - Navigation
+- `page.goto(url)` - Navigate to URL
+- `page.goto_with_referrer(url, referrer)` - Navigate with custom Referer
+- `page.goto_with_headers(url, headers)` - Navigate with custom HTTP headers
+- `page.reload()` - Reload the page
+- `page.back()` / `page.forward()` - History navigation
+
 ### Page - Clicking
 - `page.click(selector)` / `page.human_click(selector)` - Standard click
+- `page.click_at(x, y)` - Click at coordinates
 - `page.click_by_text(text)` / `page.human_click_by_text(text)` - By text
 - `page.try_click(selector)` - Returns `Ok(false)` if not found/visible
-- `page.try_click_by_text(text)` / `page.try_human_click(selector)`
+- `page.try_click_by_text(text)` / `page.try_human_click(selector)` / `page.try_human_click_by_text(text)`
 
 ### Page - Form Filling
 - `page.fill(selector, value)` - Clear and type
 - `page.human_fill(selector, value)` - Human-like clear and type
+- `page.type_text(text)` - Type into focused element
 - `page.type_into(selector, text)` - Type without clearing
 - `page.human_type(selector, text)` - Human-like typing
 
@@ -82,7 +92,8 @@ src/
 - `page.debug_screenshot(prefix)` - Timestamped screenshot
 
 ### Page - JavaScript & Frames
-- `page.evaluate(js)` / `page.execute(js)` - Run JavaScript
+- `page.evaluate(js)` / `page.evaluate_sync(js)` - Run JavaScript (sync variant skips promise await)
+- `page.execute(js)` / `page.execute_sync(js)` - Run JS, discard result
 - `page.frames()` - List all frames
 - `page.evaluate_in_frame(frame_selector, js)` - JS in iframe (uses Function constructor, CSP-safe)
 
@@ -103,17 +114,33 @@ src/
 - `page.press_key(key)` - Press key with modifiers (`Enter`, `Ctrl+A`, `Cmd+C`)
 - `page.select_all()` / `page.copy()` / `page.paste()` - Platform-aware clipboard
 
+### Page - Network & Cookies
+- `page.cookies()` / `page.set_cookie(name, value, domain, path)` / `page.delete_cookie(name, domain)`
+- `page.clear_all_cookies()` / `page.set_cookies_bulk(cookies)` - Bulk operations
+- `page.set_extra_headers(headers)` / `page.clear_extra_headers()` - Custom HTTP headers
+- `page.enable_request_capture()` / `page.disable_request_capture()` - Network capture
+- `page.get_response_body(request_id)` - Get captured response body
+
+### Page - Configuration
+- `page.set_bypass_csp(enabled)` - Disable CSP enforcement
+- `page.set_user_agent(ua)` - Override User-Agent
+- `page.ignore_cert_errors(ignore)` - Skip TLS verification
+
+### Page - Dialogs
+- `page.accept_dialog(prompt_text)` - Accept alert/confirm/prompt
+- `page.dismiss_dialog()` - Dismiss dialog
+
 ### Page - Utilities
 - `page.with_retry(attempts, delay_ms, operation)` - Retry flaky operations
-- `page.cookies()` / `page.set_cookie()` / `page.delete_cookie()`
 
 ### Element
 - `elem.click()` / `elem.human_click()` - Click
+- `elem.center()` - Get center coordinates
 - `elem.type_text(text)` / `elem.focus()` - Input
 - `elem.is_visible()` - Check if rendered (returns `Result<bool>`)
 - `elem.bounding_box()` - Get position/size (handles rotated elements)
 - `elem.get_attribute(name)` - Get attribute
-- `elem.tag_name()` / `elem.value()` / `elem.text()`
+- `elem.tag_name()` / `elem.value()` / `elem.text()` / `elem.outer_html()`
 - `elem.is_enabled()` / `elem.is_checked()` - State
 - `elem.css(property)` - Computed style
 - `elem.scroll_into_view()` - Scroll into viewport
@@ -121,7 +148,7 @@ src/
 ## Key Design Decisions
 
 ### CDP Command Filtering
-Transport blocks detectable commands at `src/cdp/transport.rs:20-30`:
+Transport blocks detectable commands at `src/cdp/transport.rs:24-37`:
 - `Runtime.enable` - BLOCKED (prevents consoleAPICalled detection)
 - `Debugger.enable` - BLOCKED
 - `HeapProfiler.*` - BLOCKED
@@ -188,7 +215,7 @@ Located in `src/stealth/evasions.rs`:
 
 ### Add new Page method
 1. Add method to `impl Page` in `src/page.rs`
-2. For text-based methods, use marker attribute pattern (data-eoka-text-match)
+2. For text-based methods, use Runtime.callFunctionOn (no DOM mutation)
 3. Update README.md API reference
 4. Update this file
 
@@ -216,6 +243,7 @@ Minimal by design:
 ```rust
 pub use browser::{Browser, TabInfo};
 pub use error::{Error, Result};
+pub use network::{NetworkEvent, NetworkWatcher};
 pub use page::{
     BoundingBox,      // Element position/size
     CapturedRequest,  // Network request info
@@ -226,6 +254,7 @@ pub use page::{
     ResponseBody,     // Text or Binary response
     TextMatch,        // Exact, Contains, StartsWith, EndsWith
 };
-pub use stealth::HumanSpeed;
+pub use session::{BrowserSession, SessionCookie};
+pub use stealth::{Fingerprint, HumanSpeed};
 pub struct StealthConfig { ... }
 ```

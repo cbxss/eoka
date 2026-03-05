@@ -164,19 +164,9 @@ impl StealthConfig {
             audio_spoof: false,
             human_mouse: false,
             human_typing: false,
-            user_agent: None,
             headless: false,
-            chrome_path: None,
             patch_binary: false,
-            viewport_width: 1920,
-            viewport_height: 1080,
-            debug: false,
-            debug_dir: None,
-            proxy: None,
-            proxy_username: None,
-            proxy_password: None,
-            cdp_timeout: 30,
-            timezone: None,
+            ..Default::default()
         }
     }
 

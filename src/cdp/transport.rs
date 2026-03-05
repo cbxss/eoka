@@ -20,36 +20,32 @@ type PendingMap = std::sync::Mutex<HashMap<u64, PendingRequest>>;
 
 use crate::error::{Error, Result};
 
-/// Commands that are blocked (highly detectable by anti-bot)
-const BLOCKED_COMMANDS: &[&str] = &[
-    "Runtime.enable",
-    "Runtime.disable",
-    "HeapProfiler.enable",
-    "HeapProfiler.disable",
-    "Profiler.enable",
-    "Profiler.disable",
-    "Debugger.enable",
-    "Debugger.disable",
-    "Console.enable",
-    "Console.disable",
-];
-
-/// Commands that trigger a warning (potentially detectable)
-const RISKY_COMMANDS: &[&str] = &[
-    "Emulation.setUserAgentOverride",
-    "Emulation.setTimezoneOverride",
-    "Emulation.setDeviceMetricsOverride",
-    "Page.setBypassCSP",
-];
-
-/// Check if a command should be blocked
+/// Check if a command should be blocked (highly detectable by anti-bot)
 fn is_blocked(method: &str) -> bool {
-    BLOCKED_COMMANDS.contains(&method)
+    matches!(
+        method,
+        "Runtime.enable"
+            | "Runtime.disable"
+            | "HeapProfiler.enable"
+            | "HeapProfiler.disable"
+            | "Profiler.enable"
+            | "Profiler.disable"
+            | "Debugger.enable"
+            | "Debugger.disable"
+            | "Console.enable"
+            | "Console.disable"
+    )
 }
 
-/// Check if a command is risky
+/// Check if a command is risky (potentially detectable)
 fn is_risky(method: &str) -> bool {
-    RISKY_COMMANDS.contains(&method)
+    matches!(
+        method,
+        "Emulation.setUserAgentOverride"
+            | "Emulation.setTimezoneOverride"
+            | "Emulation.setDeviceMetricsOverride"
+            | "Page.setBypassCSP"
+    )
 }
 
 /// A pending request waiting for a response
@@ -206,17 +202,6 @@ impl Transport {
     /// Create a new transport connecting to Chrome via WebSocket
     pub fn new(child: Child, ws_url: &str) -> Result<Self> {
         Self::new_with_options(child, ws_url, None, 30)
-    }
-
-    /// Create a new transport with optional proxy authentication credentials.
-    /// When provided, the reader loop will automatically respond to
-    /// `Fetch.authRequired` events with the given username/password.
-    pub fn new_with_proxy_auth(
-        child: Child,
-        ws_url: &str,
-        proxy_auth: Option<(String, String)>,
-    ) -> Result<Self> {
-        Self::new_with_options(child, ws_url, proxy_auth, 30)
     }
 
     /// Perform WebSocket handshake and return the connected stream.

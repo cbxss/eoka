@@ -20,18 +20,34 @@ const SETTLE_MS: u64 = 100;
 /// Brief pause (ms) between micro-interactions (e.g. focus→type, select_all→delete).
 const INTERACTION_DELAY_MS: u64 = 50;
 
-/// Escape a string for safe use in JavaScript string literals
+/// Async sleep for the given number of milliseconds.
+async fn sleep_ms(ms: u64) {
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
+/// Escape a string for safe use in JavaScript string literals (single pass)
 fn escape_js_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\'', "\\'")
-        .replace('"', "\\\"")
-        .replace('`', "\\`")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\0', "\\0")
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
-        .replace("${", "\\${")
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '"' => out.push_str("\\\""),
+            '`' => out.push_str("\\`"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            '$' if chars.peek() == Some(&'{') => {
+                out.push_str("\\${");
+                chars.next();
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Check if a CDP error is an element-related error (not found, not visible, etc.)
@@ -83,20 +99,27 @@ impl Page {
         self.session.target_id()
     }
 
-    /// Navigate to a URL
-    pub async fn goto(&self, url: &str) -> Result<()> {
-        let result = self.session.navigate(url).await?;
-        if let Some(error) = result.error_text {
-            // ERR_HTTP_RESPONSE_CODE_FAILURE means the server returned 4xx/5xx but the
-            // page still loaded — Chrome renders it normally, so don't treat it as fatal.
+    /// Check a navigation result for errors.
+    /// ERR_HTTP_RESPONSE_CODE_FAILURE (4xx/5xx) is ignored — the page still loaded.
+    fn check_nav_result(result: &crate::cdp::types::PageNavigateResult) -> Result<()> {
+        if let Some(ref error) = result.error_text {
             if error != "net::ERR_HTTP_RESPONSE_CODE_FAILURE" {
-                return Err(Error::Navigation(error));
+                return Err(Error::Navigation(error.clone()));
             }
         }
-        // Brief settle time for navigation to start. Use wait_for_navigation()
-        // for reliable completion detection.
-        tokio::time::sleep(std::time::Duration::from_millis(SETTLE_MS)).await;
         Ok(())
+    }
+
+    /// Resolve the current page URL for cookie operations.
+    /// Returns None for about:blank (Chrome silently rejects cookies without a URL).
+    async fn cookie_url(&self) -> Result<Option<String>> {
+        let url = self.url().await?;
+        Ok(if url == "about:blank" { None } else { Some(url) })
+    }
+
+    /// Navigate to a URL
+    pub async fn goto(&self, url: &str) -> Result<()> {
+        self.navigate_impl(url, None).await
     }
 
     /// Reload the page
@@ -215,10 +238,6 @@ impl Page {
             ),
         };
 
-        // Find the element and return its node via DOM.querySelector with a unique class?
-        // Better: evaluate JS that returns the element as a remote object, then get its node_id.
-        // We use Runtime.evaluate with returnByValue=false to get an object reference,
-        // then DOM.requestNode to get the node_id.
         let js = format!(
             r#"
             (() => {{
@@ -235,7 +254,6 @@ impl Page {
                 return null;
             }})()
             "#,
-            match_js = match_js
         );
 
         let result = self.session.evaluate_for_remote_object(&js).await?;
@@ -281,7 +299,6 @@ impl Page {
                 return matches;
             }})()
             "#,
-            escaped_text = escaped_text
         );
 
         // Evaluate without returnByValue to get remote object references
@@ -336,7 +353,7 @@ impl Page {
             )
             .await?;
 
-        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
+        sleep_ms(INTERACTION_DELAY_MS).await;
 
         // Mouse up
         self.session
@@ -367,7 +384,7 @@ impl Page {
     pub async fn type_into(&self, selector: &str, text: &str) -> Result<()> {
         let element = self.find(selector).await?;
         element.click().await?;
-        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
+        sleep_ms(INTERACTION_DELAY_MS).await;
         self.session.insert_text(text).await
     }
 
@@ -406,7 +423,7 @@ impl Page {
     pub async fn fill(&self, selector: &str, value: &str) -> Result<()> {
         let element = self.find(selector).await?;
         element.click().await?;
-        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
+        sleep_ms(INTERACTION_DELAY_MS).await;
 
         // Focus + select via selector (don't rely on activeElement — popups can steal focus)
         let escaped = escape_js_string(selector);
@@ -433,15 +450,9 @@ impl Page {
 
     /// Human-like typing into an element
     pub async fn human_type(&self, selector: &str, text: &str) -> Result<()> {
-        // Click first
         self.human_click(selector).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(SETTLE_MS)).await;
-
-        if self.config.human_typing {
-            self.human().type_text(text).await
-        } else {
-            self.session.insert_text(text).await
-        }
+        sleep_ms(SETTLE_MS).await;
+        self.human_type_text(text).await
     }
 
     /// Human-like click on an element found by text content
@@ -466,21 +477,19 @@ impl Page {
 
     /// Human-like form fill: click, clear, type with natural delays
     pub async fn human_fill(&self, selector: &str, value: &str) -> Result<()> {
-        // Human click on the field
         self.human_click(selector).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(SETTLE_MS)).await;
-
-        // Select all to clear (Cmd+A / Ctrl+A behavior via select())
+        sleep_ms(SETTLE_MS).await;
         self.execute("document.activeElement.select()").await?;
+        sleep_ms(INTERACTION_DELAY_MS).await;
+        self.human_type_text(value).await
+    }
 
-        // Small pause before typing
-        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
-
-        // Type with human-like delays
+    /// Type text, using human-like timing if configured
+    async fn human_type_text(&self, text: &str) -> Result<()> {
         if self.config.human_typing {
-            self.human().type_text(value).await
+            self.human().type_text(text).await
         } else {
-            self.session.insert_text(value).await
+            self.session.insert_text(text).await
         }
     }
 
@@ -509,11 +518,7 @@ impl Page {
     }
     /// Evaluate JavaScript and return the result
     pub async fn evaluate<T: serde::de::DeserializeOwned>(&self, expression: &str) -> Result<T> {
-        let result = self.check_js_result(self.session.evaluate(expression).await?)?;
-        let value = result
-            .value
-            .ok_or_else(|| Error::CdpSimple("No value returned from evaluate".into()))?;
-        Ok(serde_json::from_value(value)?)
+        self.eval_impl(self.session.evaluate(expression).await?)
     }
 
     /// Evaluate JavaScript synchronously (don't await promises).
@@ -522,10 +527,18 @@ impl Page {
         &self,
         expression: &str,
     ) -> Result<T> {
-        let result = self.check_js_result(self.session.evaluate_sync(expression).await?)?;
-        let value = result
+        self.eval_impl(self.session.evaluate_sync(expression).await?)
+    }
+
+    /// Shared impl: check for exceptions and extract the value
+    fn eval_impl<T: serde::de::DeserializeOwned>(
+        &self,
+        result: crate::cdp::types::RuntimeEvaluateResult,
+    ) -> Result<T> {
+        let remote = self.check_js_result(result)?;
+        let value = remote
             .value
-            .ok_or_else(|| Error::CdpSimple("No value returned from evaluate_sync".into()))?;
+            .ok_or_else(|| Error::CdpSimple("No value returned from evaluate".into()))?;
         Ok(serde_json::from_value(value)?)
     }
 
@@ -567,19 +580,11 @@ impl Page {
         domain: Option<&str>,
         path: Option<&str>,
     ) -> Result<()> {
-        // Propagate URL fetch errors — a None url causes Chrome to silently
-        // reject the cookie, which is worse than failing loudly.
-        let url = self.url().await?;
-        let url_ref = if url == "about:blank" {
-            None
-        } else {
-            Some(url.as_str())
-        };
+        let url = self.cookie_url().await?;
         let success = self
             .session
-            .set_cookie(name, value, url_ref, domain, path)
+            .set_cookie(name, value, url.as_deref(), domain, path)
             .await?;
-
         if !success {
             return Err(Error::CdpSimple("Failed to set cookie".into()));
         }
@@ -588,13 +593,10 @@ impl Page {
 
     /// Delete a cookie
     pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
-        let url = self.url().await?;
-        let url_ref = if url == "about:blank" {
-            None
-        } else {
-            Some(url.as_str())
-        };
-        self.session.delete_cookies(name, url_ref, domain).await
+        let url = self.cookie_url().await?;
+        self.session
+            .delete_cookies(name, url.as_deref(), domain)
+            .await
     }
 
     /// Clear all browser cookies for this context.
@@ -636,13 +638,14 @@ impl Page {
 
     /// Navigate to `url` with a custom Referer header.
     pub async fn goto_with_referrer(&self, url: &str, referrer: &str) -> Result<()> {
-        let result = self.session.navigate_with_referrer(url, referrer).await?;
-        if let Some(error) = result.error_text {
-            if error != "net::ERR_HTTP_RESPONSE_CODE_FAILURE" {
-                return Err(Error::Navigation(error));
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(SETTLE_MS)).await;
+        self.navigate_impl(url, Some(referrer)).await
+    }
+
+    /// Shared navigation impl
+    async fn navigate_impl(&self, url: &str, referrer: Option<&str>) -> Result<()> {
+        let result = self.session.navigate(url, referrer).await?;
+        Self::check_nav_result(&result)?;
+        sleep_ms(SETTLE_MS).await;
         Ok(())
     }
 
@@ -690,7 +693,7 @@ impl Page {
             if start.elapsed() > timeout {
                 return Err(Error::Timeout(error_msg));
             }
-            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+            sleep_ms(POLL_INTERVAL_MS).await;
         }
     }
 
@@ -729,20 +732,14 @@ impl Page {
                 "Element '{}' still visible after {}ms",
                 selector, timeout_ms
             ),
-            || async {
-                if self.find(selector).await.is_err() {
-                    Some(())
-                } else {
-                    None
-                }
-            },
+            || async { self.find(selector).await.is_err().then_some(()) },
         )
         .await
     }
 
     /// Wait for a fixed duration
     pub async fn wait(&self, ms: u64) {
-        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        sleep_ms(ms).await;
     }
 
     /// Wait for an element with specific text to appear
@@ -930,7 +927,7 @@ impl Page {
                 )));
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
+            sleep_ms(INTERACTION_DELAY_MS).await;
         }
     }
     /// Get a list of all frames on the page
@@ -982,8 +979,6 @@ impl Page {
                 return _exec.call(iframe.contentWindow);
             }})()
             "#,
-            escaped_frame = escaped_frame,
-            escaped_expr = escaped_expr
         );
 
         self.evaluate(&js).await
@@ -1007,7 +1002,7 @@ impl Page {
                 Err(e) => {
                     last_error = e.to_string();
                     if attempt < attempts {
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        sleep_ms(delay_ms).await;
                     }
                 }
             }
@@ -1122,7 +1117,7 @@ impl Page {
         element.scroll_into_view().await?;
         let (x, y) = element.center().await?;
         Human::new(&self.session).move_to(x, y).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(SETTLE_MS)).await;
+        sleep_ms(SETTLE_MS).await;
         Ok(())
     }
 
@@ -1147,7 +1142,7 @@ impl Page {
         self.session
             .dispatch_key_event_full(make_event(KeyEventType::KeyDown))
             .await?;
-        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
+        sleep_ms(INTERACTION_DELAY_MS).await;
         self.session
             .dispatch_key_event_full(make_event(KeyEventType::KeyUp))
             .await
@@ -1155,32 +1150,17 @@ impl Page {
 
     /// Platform-aware select all (Cmd+A on Mac, Ctrl+A elsewhere)
     pub async fn select_all(&self) -> Result<()> {
-        self.press_key(if cfg!(target_os = "macos") {
-            "Cmd+A"
-        } else {
-            "Ctrl+A"
-        })
-        .await
+        self.press_key(if cfg!(target_os = "macos") { "Cmd+A" } else { "Ctrl+A" }).await
     }
 
     /// Platform-aware copy (Cmd+C on Mac, Ctrl+C elsewhere)
     pub async fn copy(&self) -> Result<()> {
-        self.press_key(if cfg!(target_os = "macos") {
-            "Cmd+C"
-        } else {
-            "Ctrl+C"
-        })
-        .await
+        self.press_key(if cfg!(target_os = "macos") { "Cmd+C" } else { "Ctrl+C" }).await
     }
 
     /// Platform-aware paste (Cmd+V on Mac, Ctrl+V elsewhere)
     pub async fn paste(&self) -> Result<()> {
-        self.press_key(if cfg!(target_os = "macos") {
-            "Cmd+V"
-        } else {
-            "Ctrl+V"
-        })
-        .await
+        self.press_key(if cfg!(target_os = "macos") { "Cmd+V" } else { "Ctrl+V" }).await
     }
 }
 
@@ -1382,12 +1362,7 @@ impl<'a> Element<'a> {
     ///
     /// Extracts text content from the element's outerHTML without using focus.
     pub async fn text(&self) -> Result<String> {
-        let value = self.eval_on_element("this.textContent || ''").await?;
-
-        if let Some(s) = value.as_str() {
-            return Ok(s.to_string());
-        }
-        Ok(String::new())
+        self.eval_str("this.textContent || ''").await
     }
 
     /// Evaluate a JavaScript expression on this element via Runtime.callFunctionOn.
@@ -1396,21 +1371,27 @@ impl<'a> Element<'a> {
     /// Example: `"this.textContent || ''"`, `"this.tagName.toLowerCase()"`
     async fn eval_on_element(&self, js_body: &str) -> Result<serde_json::Value> {
         let object_id = self.page.session.resolve_node(self.node_id).await?;
-
         let func = format!("function() {{ return {}; }}", js_body);
-
-        let result = self
-            .page
-            .session
-            .call_function_on(&object_id, &func)
-            .await?;
+        let result = self.page.session.call_function_on(&object_id, &func).await?;
         Ok(result.result.value.unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Evaluate JS on element, return as String (empty string on null/non-string)
+    async fn eval_str(&self, js_body: &str) -> Result<String> {
+        let value = self.eval_on_element(js_body).await?;
+        Ok(value.as_str().unwrap_or("").to_string())
+    }
+
+    /// Evaluate JS on element, return as bool with a default
+    async fn eval_bool(&self, js_body: &str, default: bool) -> Result<bool> {
+        let value = self.eval_on_element(js_body).await?;
+        Ok(value.as_bool().unwrap_or(default))
     }
 
     /// Type text into this element
     pub async fn type_text(&self, text: &str) -> Result<()> {
         self.click().await?;
-        tokio::time::sleep(std::time::Duration::from_millis(INTERACTION_DELAY_MS)).await;
+        sleep_ms(INTERACTION_DELAY_MS).await;
         self.page.session.insert_text(text).await
     }
 
@@ -1477,58 +1458,32 @@ impl<'a> Element<'a> {
 
     /// Get the tag name of the element (e.g., "div", "input", "a")
     pub async fn tag_name(&self) -> Result<String> {
-        let value = self.eval_on_element("this.tagName.toLowerCase()").await?;
-
-        if let Some(s) = value.as_str() {
-            return Ok(s.to_string());
-        }
-        Ok(String::new())
+        self.eval_str("this.tagName.toLowerCase()").await
     }
 
     /// Check if the element is enabled (not disabled)
     pub async fn is_enabled(&self) -> Result<bool> {
-        let value = self.eval_on_element("!this.disabled").await?;
-
-        if let Some(b) = value.as_bool() {
-            return Ok(b);
-        }
-        Ok(true) // Default to enabled if we can't determine
+        self.eval_bool("!this.disabled", true).await
     }
 
     /// Check if a checkbox/radio is checked
     pub async fn is_checked(&self) -> Result<bool> {
-        let value = self.eval_on_element("this.checked === true").await?;
-
-        if let Some(b) = value.as_bool() {
-            return Ok(b);
-        }
-        Ok(false)
+        self.eval_bool("this.checked === true", false).await
     }
 
     /// Get the value of an input element
     pub async fn value(&self) -> Result<String> {
-        let value = self.eval_on_element("this.value || ''").await?;
-
-        if let Some(s) = value.as_str() {
-            return Ok(s.to_string());
-        }
-        Ok(String::new())
+        self.eval_str("this.value || ''").await
     }
 
     /// Get computed CSS property value
     pub async fn css(&self, property: &str) -> Result<String> {
         let escaped = escape_js_string(property);
-        let value = self
-            .eval_on_element(&format!(
-                "getComputedStyle(this).getPropertyValue('{}')",
-                escaped
-            ))
-            .await?;
-
-        if let Some(s) = value.as_str() {
-            return Ok(s.to_string());
-        }
-        Ok(String::new())
+        self.eval_str(&format!(
+            "getComputedStyle(this).getPropertyValue('{}')",
+            escaped
+        ))
+        .await
     }
 
     /// Scroll this element into view

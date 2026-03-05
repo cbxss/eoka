@@ -28,7 +28,7 @@ const MACOS_VERSIONS: &[&str] = &[
 ];
 
 /// Windows versions
-const WINDOWS_VERSIONS: &[&str] = &["10.0", "10.0; Win64; x64"];
+const WINDOWS_VERSIONS: &[&str] = &["10.0"];
 
 /// WebGL renderers for Mac
 const WEBGL_RENDERERS_MAC: &[&str] = &[
@@ -130,21 +130,6 @@ impl Fingerprint {
         let hardware_concurrency = *choose(&[4, 8, 10, 12, 16]);
         let device_memory = *choose(&[8, 16, 32]);
 
-        let timezones = [
-            "America/New_York",
-            "America/Chicago",
-            "America/Los_Angeles",
-            "America/Sao_Paulo",
-            "Europe/London",
-            "Europe/Paris",
-            "Europe/Berlin",
-            "Europe/Moscow",
-            "Asia/Tokyo",
-            "Asia/Shanghai",
-            "Asia/Kolkata",
-            "Australia/Sydney",
-        ];
-
         Self {
             user_agent: random_user_agent(),
             platform,
@@ -153,7 +138,7 @@ impl Fingerprint {
             color_depth: 24,
             hardware_concurrency,
             device_memory,
-            timezone: choose(&timezones).to_string(),
+            timezone: choose(super::evasions::COMMON_TIMEZONES).to_string(),
             languages: vec!["en-US".to_string(), "en".to_string()],
             webgl_vendor: webgl_vendor.to_string(),
             webgl_renderer: webgl_renderer.to_string(),

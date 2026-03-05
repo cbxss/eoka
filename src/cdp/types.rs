@@ -6,6 +6,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Empty params for CDP commands that take no arguments
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Empty {}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetCreateTarget {
@@ -50,8 +54,7 @@ pub struct TargetAttachToTargetResult {
     pub session_id: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct TargetGetTargets {}
+pub type TargetGetTargets = Empty;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,8 +102,7 @@ pub struct PageNavigateResult {
     pub http_status_code: Option<u16>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct PageEnable {}
+pub type PageEnable = Empty;
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,8 +113,7 @@ pub struct PageReload {
     pub script_to_evaluate_on_load: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct PageGetNavigationHistory {}
+pub type PageGetNavigationHistory = Empty;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,8 +168,7 @@ pub struct PageCaptureScreenshotResult {
     pub data: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct PageGetFrameTree {}
+pub type PageGetFrameTree = Empty;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -334,8 +334,7 @@ pub struct NetworkEnable {
     pub max_post_data_size: Option<i64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct NetworkDisable {}
+pub type NetworkDisable = Empty;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -645,8 +644,7 @@ pub struct RuntimeCallFunctionOnResult {
     pub exception_details: Option<ExceptionDetails>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct BrowserGetVersion {}
+pub type BrowserGetVersion = Empty;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -657,8 +655,7 @@ pub struct BrowserGetVersionResult {
     pub user_agent: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct BrowserClose {}
+pub type BrowserClose = Empty;
 
 // === File Upload ===
 
@@ -706,15 +703,6 @@ pub mod modifiers {
 
 // === Target Discovery (for multi-tab) ===
 
-// === Fetch domain (proxy authentication) ===
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FetchEnable {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub handle_auth_requests: Option<bool>,
-}
-
 // === 2026 additions: headers, cookies, CSP bypass, UA, TLS, dialogs, Fetch interception ===
 
 /// Network.setExtraHTTPHeaders — inject extra headers into every request on this session
@@ -725,8 +713,7 @@ pub struct NetworkSetExtraHTTPHeaders {
 }
 
 /// Network.clearBrowserCookies — wipe all cookies for this browser context
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct NetworkClearBrowserCookies {}
+pub type NetworkClearBrowserCookies = Empty;
 
 /// Network.setCookies — bulk-set multiple cookies at once
 #[derive(Debug, Clone, Default, Serialize)]
@@ -784,10 +771,10 @@ pub struct RequestPattern {
     pub request_stage: Option<String>,
 }
 
-/// Fetch.enable with URL patterns for request interception
+/// Fetch.enable — optionally with URL patterns for request interception
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FetchEnableWithPatterns {
+pub struct FetchEnable {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patterns: Option<Vec<RequestPattern>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -795,8 +782,7 @@ pub struct FetchEnableWithPatterns {
 }
 
 /// Fetch.disable — turn off Fetch domain interception
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct FetchDisable {}
+pub type FetchDisable = Empty;
 
 /// A single header name/value pair used in Fetch.fulfillRequest / Fetch.continueRequest
 #[derive(Debug, Clone, Serialize, Deserialize)]

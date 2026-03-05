@@ -99,23 +99,26 @@ impl Connection {
 
     /// Activate (focus) a target
     pub async fn activate_target(&self, target_id: &str) -> Result<()> {
+        self.send_void(
+            "Target.activateTarget",
+            &TargetActivateTarget {
+                target_id: target_id.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// Send a fire-and-forget command (discard the response)
+    async fn send_void<C: serde::Serialize>(&self, method: &str, params: &C) -> Result<()> {
         self.transport
-            .send::<_, serde_json::Value>(
-                "Target.activateTarget",
-                &TargetActivateTarget {
-                    target_id: target_id.to_string(),
-                },
-            )
+            .send::<_, serde_json::Value>(method, params)
             .await?;
         Ok(())
     }
 
     /// Close the browser
     pub async fn close(&self) -> Result<()> {
-        let _ = self
-            .transport
-            .send::<_, serde_json::Value>("Browser.close", &BrowserClose {})
-            .await;
+        let _ = self.send_void("Browser.close", &BrowserClose {}).await;
         self.transport.close().await
     }
 }
@@ -149,49 +152,35 @@ impl Session {
             .await
     }
 
-    /// Enable the Fetch domain to handle auth challenges (for proxy auth).
+    /// Send a fire-and-forget command (discard the response)
+    async fn send_void<C: serde::Serialize>(&self, method: &str, params: &C) -> Result<()> {
+        self.send::<_, serde_json::Value>(method, params).await?;
+        Ok(())
+    }
+
+    /// Enable the Fetch domain, optionally handling auth challenges (proxy auth).
     /// Must be called per-session (per-tab).
     pub async fn fetch_enable(&self, handle_auth_requests: bool) -> Result<()> {
-        self.send::<_, serde_json::Value>(
-            "Fetch.enable",
-            &FetchEnable {
-                handle_auth_requests: Some(handle_auth_requests),
-            },
-        )
-        .await?;
-        Ok(())
+        self.fetch_enable_interception(vec![], handle_auth_requests)
+            .await
     }
 
     /// Enable page events
     pub async fn page_enable(&self) -> Result<()> {
-        self.send::<_, serde_json::Value>("Page.enable", &PageEnable {})
-            .await?;
-        Ok(())
+        self.send_void("Page.enable", &PageEnable {}).await
     }
 
-    /// Navigate to a URL
-    pub async fn navigate(&self, url: &str) -> Result<PageNavigateResult> {
-        self.send(
-            "Page.navigate",
-            &PageNavigate {
-                url: url.to_string(),
-                referrer: None,
-            },
-        )
-        .await
-    }
-
-    /// Navigate with a custom Referer header
-    pub async fn navigate_with_referrer(
+    /// Navigate to a URL, optionally with a custom Referer header
+    pub async fn navigate(
         &self,
         url: &str,
-        referrer: &str,
+        referrer: Option<&str>,
     ) -> Result<PageNavigateResult> {
         self.send(
             "Page.navigate",
             &PageNavigate {
                 url: url.to_string(),
-                referrer: Some(referrer.to_string()),
+                referrer: referrer.map(String::from),
             },
         )
         .await
@@ -203,12 +192,8 @@ impl Session {
         &self,
         headers: std::collections::HashMap<String, String>,
     ) -> Result<()> {
-        self.send::<_, serde_json::Value>(
-            "Network.setExtraHTTPHeaders",
-            &NetworkSetExtraHTTPHeaders { headers },
-        )
-        .await?;
-        Ok(())
+        self.send_void("Network.setExtraHTTPHeaders", &NetworkSetExtraHTTPHeaders { headers })
+            .await
     }
 
     /// Remove all extra HTTP headers previously set via set_extra_headers.
@@ -219,27 +204,21 @@ impl Session {
 
     /// Clear all browser cookies for this context.
     pub async fn clear_all_cookies(&self) -> Result<()> {
-        self.send::<_, serde_json::Value>(
-            "Network.clearBrowserCookies",
-            &NetworkClearBrowserCookies {},
-        )
-        .await?;
-        Ok(())
+        self.send_void("Network.clearBrowserCookies", &NetworkClearBrowserCookies {})
+            .await
     }
 
     /// Bulk-set multiple cookies at once.
     pub async fn set_cookies(&self, cookies: Vec<NetworkSetCookie>) -> Result<()> {
-        self.send::<_, serde_json::Value>("Network.setCookies", &NetworkSetCookies { cookies })
-            .await?;
-        Ok(())
+        self.send_void("Network.setCookies", &NetworkSetCookies { cookies })
+            .await
     }
 
     /// Bypass CSP enforcement for the current page.
     /// Must be called before navigation to take effect.
     pub async fn set_bypass_csp(&self, enabled: bool) -> Result<()> {
-        self.send::<_, serde_json::Value>("Page.setBypassCSP", &PageSetBypassCSP { enabled })
-            .await?;
-        Ok(())
+        self.send_void("Page.setBypassCSP", &PageSetBypassCSP { enabled })
+            .await
     }
 
     /// Override the User-Agent string (and optionally Accept-Language).
@@ -248,7 +227,7 @@ impl Session {
         user_agent: &str,
         accept_language: Option<&str>,
     ) -> Result<()> {
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "Emulation.setUserAgentOverride",
             &EmulationSetUserAgentOverride {
                 user_agent: user_agent.to_string(),
@@ -256,32 +235,29 @@ impl Session {
                 platform: None,
             },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Ignore TLS certificate errors for this session.
     pub async fn set_ignore_cert_errors(&self, ignore: bool) -> Result<()> {
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "Security.setIgnoreCertificateErrors",
             &SecuritySetIgnoreCertificateErrors { ignore },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Accept or dismiss a JavaScript dialog (alert / confirm / prompt).
     /// `prompt_text` is only used for prompt() dialogs.
     pub async fn handle_dialog(&self, accept: bool, prompt_text: Option<&str>) -> Result<()> {
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "Page.handleJavaScriptDialog",
             &PageHandleJavaScriptDialog {
                 accept,
                 prompt_text: prompt_text.map(String::from),
             },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Enable Fetch domain request interception with URL patterns.
@@ -291,9 +267,9 @@ impl Session {
         patterns: Vec<RequestPattern>,
         handle_auth: bool,
     ) -> Result<()> {
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "Fetch.enable",
-            &FetchEnableWithPatterns {
+            &FetchEnable {
                 patterns: if patterns.is_empty() {
                     None
                 } else {
@@ -302,15 +278,12 @@ impl Session {
                 handle_auth_requests: Some(handle_auth),
             },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Disable Fetch domain interception.
     pub async fn fetch_disable(&self) -> Result<()> {
-        self.send::<_, serde_json::Value>("Fetch.disable", &FetchDisable {})
-            .await?;
-        Ok(())
+        self.send_void("Fetch.disable", &FetchDisable {}).await
     }
 
     /// Continue an intercepted request, optionally modifying URL/method/headers/body.
@@ -322,7 +295,7 @@ impl Session {
         headers: Option<Vec<FetchHeaderEntry>>,
         post_data: Option<&str>,
     ) -> Result<()> {
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "Fetch.continueRequest",
             &FetchContinueRequest {
                 request_id: request_id.to_string(),
@@ -333,8 +306,7 @@ impl Session {
                 intercept_response: None,
             },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Fulfill an intercepted request with a synthetic response.
@@ -350,7 +322,7 @@ impl Session {
             use base64::Engine;
             base64::engine::general_purpose::STANDARD.encode(b)
         });
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "Fetch.fulfillRequest",
             &FetchFulfillRequest {
                 request_id: request_id.to_string(),
@@ -360,72 +332,61 @@ impl Session {
                 response_phrase: None,
             },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Abort an intercepted request with a network error.
     /// `error_reason`: "Aborted", "AccessDenied", "AddressUnreachable", "ConnectionRefused", etc.
     pub async fn fetch_fail(&self, request_id: &str, error_reason: &str) -> Result<()> {
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "Fetch.failRequest",
             &FetchFailRequest {
                 request_id: request_id.to_string(),
                 error_reason: error_reason.to_string(),
             },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Reload the page
     pub async fn reload(&self, ignore_cache: bool) -> Result<()> {
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "Page.reload",
             &PageReload {
                 ignore_cache: Some(ignore_cache),
                 script_to_evaluate_on_load: None,
             },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
-    /// Go back in history
-    pub async fn go_back(&self) -> Result<()> {
+    /// Navigate to a history entry by offset (-1 = back, +1 = forward)
+    async fn navigate_history(&self, offset: i32) -> Result<()> {
         let history: PageGetNavigationHistoryResult = self
             .send("Page.getNavigationHistory", &PageGetNavigationHistory {})
             .await?;
-        if history.current_index > 0 {
-            let prev = history.current_index as usize - 1;
-            if let Some(entry) = history.entries.get(prev) {
-                self.send::<_, serde_json::Value>(
-                    "Page.navigateToHistoryEntry",
-                    &PageNavigateToHistoryEntry { entry_id: entry.id },
-                )
-                .await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Go forward in history
-    pub async fn go_forward(&self) -> Result<()> {
-        let history: PageGetNavigationHistoryResult = self
-            .send("Page.getNavigationHistory", &PageGetNavigationHistory {})
-            .await?;
-        if history.current_index < 0 {
+        let target = history.current_index + offset;
+        if target < 0 {
             return Ok(());
         }
-        let next = history.current_index as usize + 1;
-        if let Some(entry) = history.entries.get(next) {
-            self.send::<_, serde_json::Value>(
+        if let Some(entry) = history.entries.get(target as usize) {
+            self.send_void(
                 "Page.navigateToHistoryEntry",
                 &PageNavigateToHistoryEntry { entry_id: entry.id },
             )
             .await?;
         }
         Ok(())
+    }
+
+    /// Go back in history
+    pub async fn go_back(&self) -> Result<()> {
+        self.navigate_history(-1).await
+    }
+
+    /// Go forward in history
+    pub async fn go_forward(&self) -> Result<()> {
+        self.navigate_history(1).await
     }
 
     /// Add a script to evaluate on every new document
@@ -518,9 +479,7 @@ impl Session {
 
     /// Dispatch a raw mouse event with full control over all fields
     pub async fn dispatch_mouse_event_full(&self, event: InputDispatchMouseEvent) -> Result<()> {
-        self.send::<_, serde_json::Value>("Input.dispatchMouseEvent", &event)
-            .await?;
-        Ok(())
+        self.send_void("Input.dispatchMouseEvent", &event).await
     }
 
     /// Dispatch a key event
@@ -531,7 +490,7 @@ impl Session {
         text: Option<&str>,
         code: Option<&str>,
     ) -> Result<()> {
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "Input.dispatchKeyEvent",
             &InputDispatchKeyEvent {
                 r#type: event_type,
@@ -540,20 +499,13 @@ impl Session {
                 key: key.map(String::from),
             },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Insert text at current cursor position
     pub async fn insert_text(&self, text: &str) -> Result<()> {
-        self.send::<_, serde_json::Value>(
-            "Input.insertText",
-            &InputInsertText {
-                text: text.to_string(),
-            },
-        )
-        .await?;
-        Ok(())
+        self.send_void("Input.insertText", &InputInsertText { text: text.to_string() })
+            .await
     }
 
     /// Get the document root node
@@ -657,14 +609,8 @@ impl Session {
 
     /// Focus an element
     pub async fn focus(&self, node_id: i32) -> Result<()> {
-        self.send::<_, serde_json::Value>(
-            "DOM.focus",
-            &DOMFocus {
-                node_id: Some(node_id),
-            },
-        )
-        .await?;
-        Ok(())
+        self.send_void("DOM.focus", &DOMFocus { node_id: Some(node_id) })
+            .await
     }
 
     /// Get all cookies
@@ -707,7 +653,7 @@ impl Session {
         url: Option<&str>,
         domain: Option<&str>,
     ) -> Result<()> {
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "Network.deleteCookies",
             &NetworkDeleteCookies {
                 name: name.to_string(),
@@ -716,28 +662,24 @@ impl Session {
                 ..Default::default()
             },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Enable network events (request/response capture)
     /// NOTE: This enables Network.enable which may be slightly detectable
     pub async fn network_enable(&self) -> Result<()> {
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "Network.enable",
             &NetworkEnable {
                 max_post_data_size: Some(65536), // Capture POST data up to 64KB
             },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Disable network events
     pub async fn network_disable(&self) -> Result<()> {
-        self.send::<_, serde_json::Value>("Network.disable", &NetworkDisable {})
-            .await?;
-        Ok(())
+        self.send_void("Network.disable", &NetworkDisable {}).await
     }
 
     /// Get response body for a request
@@ -849,7 +791,7 @@ impl Session {
 
     /// Set files for a file input element
     pub async fn set_file_input_files(&self, node_id: i32, files: Vec<String>) -> Result<()> {
-        self.send::<_, serde_json::Value>(
+        self.send_void(
             "DOM.setFileInputFiles",
             &DOMSetFileInputFiles {
                 files,
@@ -858,14 +800,11 @@ impl Session {
                 object_id: None,
             },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Dispatch a key event with full modifier support
     pub async fn dispatch_key_event_full(&self, event: InputDispatchKeyEventFull) -> Result<()> {
-        self.send::<_, serde_json::Value>("Input.dispatchKeyEvent", &event)
-            .await?;
-        Ok(())
+        self.send_void("Input.dispatchKeyEvent", &event).await
     }
 }

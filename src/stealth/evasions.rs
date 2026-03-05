@@ -714,7 +714,7 @@ Intl.DateTimeFormat.supportedLocalesOf = origDateTimeFormat.supportedLocalesOf;
 "#;
 
 /// Common timezones for random selection (balanced across regions)
-const COMMON_TIMEZONES: &[&str] = &[
+pub(crate) const COMMON_TIMEZONES: &[&str] = &[
     // Americas (4)
     "America/New_York",
     "America/Chicago",

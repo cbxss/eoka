@@ -219,7 +219,7 @@ impl Browser {
         self.setup_session(&session).await?;
 
         // Navigate to URL
-        let nav_result = session.navigate(url).await?;
+        let nav_result = session.navigate(url, None).await?;
         if let Some(error) = nav_result.error_text {
             return Err(Error::Navigation(error));
         }

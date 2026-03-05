@@ -186,15 +186,46 @@ browser.activate_tab(page1.target_id()).await?;
 browser.close_tab(page2.target_id()).await?;
 ```
 
-### Retry & Cookies
+### Navigation
+
+```rust
+page.goto("https://example.com").await?;
+page.goto_with_referrer("https://example.com", "https://google.com").await?;
+page.goto_with_headers("https://example.com", headers).await?;
+page.reload().await?;
+page.back().await?;
+page.forward().await?;
+```
+
+### Network & Cookies
+
+```rust
+let cookies = page.cookies().await?;
+page.set_cookie("name", "value", Some("example.com"), None).await?;
+page.delete_cookie("name", None).await?;
+page.clear_all_cookies().await?;
+
+page.enable_request_capture().await?;       // start capturing XHR/fetch
+let body = page.get_response_body(id).await?;
+page.disable_request_capture().await?;
+```
+
+### Configuration & Dialogs
+
+```rust
+page.set_bypass_csp(true).await?;           // disable CSP
+page.set_user_agent("custom UA").await?;
+page.ignore_cert_errors(true).await?;
+page.accept_dialog(None).await?;            // accept alert/confirm
+page.dismiss_dialog().await?;               // dismiss dialog
+```
+
+### Retry
 
 ```rust
 page.with_retry(3, 500, || async {
     page.human_click("#flaky").await
 }).await?;
-
-let cookies = page.cookies().await?;
-page.set_cookie(cookie).await?;
 ```
 
 ## Config
@@ -223,7 +254,7 @@ Patches Chrome binary, injects 15 evasion scripts, blocks detectable CDP command
 
 ## How it Works
 
-~4.5K lines of Rust. No chromiumoxide, no puppeteer-extra. Hand-written CDP types for the ~30 commands actually needed. 8 crate dependencies.
+~5K lines of Rust. No chromiumoxide, no puppeteer-extra. Hand-written CDP types for the ~30 commands actually needed. 9 crate dependencies.
 
 ```
 src/

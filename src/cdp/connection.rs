@@ -171,11 +171,7 @@ impl Session {
     }
 
     /// Navigate to a URL, optionally with a custom Referer header
-    pub async fn navigate(
-        &self,
-        url: &str,
-        referrer: Option<&str>,
-    ) -> Result<PageNavigateResult> {
+    pub async fn navigate(&self, url: &str, referrer: Option<&str>) -> Result<PageNavigateResult> {
         self.send(
             "Page.navigate",
             &PageNavigate {
@@ -192,8 +188,11 @@ impl Session {
         &self,
         headers: std::collections::HashMap<String, String>,
     ) -> Result<()> {
-        self.send_void("Network.setExtraHTTPHeaders", &NetworkSetExtraHTTPHeaders { headers })
-            .await
+        self.send_void(
+            "Network.setExtraHTTPHeaders",
+            &NetworkSetExtraHTTPHeaders { headers },
+        )
+        .await
     }
 
     /// Remove all extra HTTP headers previously set via set_extra_headers.
@@ -204,8 +203,11 @@ impl Session {
 
     /// Clear all browser cookies for this context.
     pub async fn clear_all_cookies(&self) -> Result<()> {
-        self.send_void("Network.clearBrowserCookies", &NetworkClearBrowserCookies {})
-            .await
+        self.send_void(
+            "Network.clearBrowserCookies",
+            &NetworkClearBrowserCookies {},
+        )
+        .await
     }
 
     /// Bulk-set multiple cookies at once.
@@ -504,8 +506,13 @@ impl Session {
 
     /// Insert text at current cursor position
     pub async fn insert_text(&self, text: &str) -> Result<()> {
-        self.send_void("Input.insertText", &InputInsertText { text: text.to_string() })
-            .await
+        self.send_void(
+            "Input.insertText",
+            &InputInsertText {
+                text: text.to_string(),
+            },
+        )
+        .await
     }
 
     /// Get the document root node
@@ -609,8 +616,13 @@ impl Session {
 
     /// Focus an element
     pub async fn focus(&self, node_id: i32) -> Result<()> {
-        self.send_void("DOM.focus", &DOMFocus { node_id: Some(node_id) })
-            .await
+        self.send_void(
+            "DOM.focus",
+            &DOMFocus {
+                node_id: Some(node_id),
+            },
+        )
+        .await
     }
 
     /// Get all cookies

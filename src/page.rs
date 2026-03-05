@@ -114,7 +114,11 @@ impl Page {
     /// Returns None for about:blank (Chrome silently rejects cookies without a URL).
     async fn cookie_url(&self) -> Result<Option<String>> {
         let url = self.url().await?;
-        Ok(if url == "about:blank" { None } else { Some(url) })
+        Ok(if url == "about:blank" {
+            None
+        } else {
+            Some(url)
+        })
     }
 
     /// Navigate to a URL
@@ -1150,17 +1154,32 @@ impl Page {
 
     /// Platform-aware select all (Cmd+A on Mac, Ctrl+A elsewhere)
     pub async fn select_all(&self) -> Result<()> {
-        self.press_key(if cfg!(target_os = "macos") { "Cmd+A" } else { "Ctrl+A" }).await
+        self.press_key(if cfg!(target_os = "macos") {
+            "Cmd+A"
+        } else {
+            "Ctrl+A"
+        })
+        .await
     }
 
     /// Platform-aware copy (Cmd+C on Mac, Ctrl+C elsewhere)
     pub async fn copy(&self) -> Result<()> {
-        self.press_key(if cfg!(target_os = "macos") { "Cmd+C" } else { "Ctrl+C" }).await
+        self.press_key(if cfg!(target_os = "macos") {
+            "Cmd+C"
+        } else {
+            "Ctrl+C"
+        })
+        .await
     }
 
     /// Platform-aware paste (Cmd+V on Mac, Ctrl+V elsewhere)
     pub async fn paste(&self) -> Result<()> {
-        self.press_key(if cfg!(target_os = "macos") { "Cmd+V" } else { "Ctrl+V" }).await
+        self.press_key(if cfg!(target_os = "macos") {
+            "Cmd+V"
+        } else {
+            "Ctrl+V"
+        })
+        .await
     }
 }
 
@@ -1372,7 +1391,11 @@ impl<'a> Element<'a> {
     async fn eval_on_element(&self, js_body: &str) -> Result<serde_json::Value> {
         let object_id = self.page.session.resolve_node(self.node_id).await?;
         let func = format!("function() {{ return {}; }}", js_body);
-        let result = self.page.session.call_function_on(&object_id, &func).await?;
+        let result = self
+            .page
+            .session
+            .call_function_on(&object_id, &func)
+            .await?;
         Ok(result.result.value.unwrap_or(serde_json::Value::Null))
     }
 

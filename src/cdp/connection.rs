@@ -141,6 +141,11 @@ impl Session {
         &self.target_id
     }
 
+    /// Get a reference to the underlying transport (for event polling)
+    pub fn transport(&self) -> &Arc<Transport> {
+        &self.transport
+    }
+
     /// Send a command to this session
     pub async fn send<C, R>(&self, method: &str, params: &C) -> Result<R>
     where

@@ -71,6 +71,11 @@ fn stealth_args(config: &StealthConfig) -> Vec<String> {
         args.push(format!("--proxy-server={}", proxy));
     }
 
+    // Extra user-supplied args (e.g. --use-fake-ui-for-media-stream)
+    for arg in &config.extra_args {
+        args.push(arg.clone());
+    }
+
     args
 }
 

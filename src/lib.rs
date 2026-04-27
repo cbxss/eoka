@@ -128,6 +128,9 @@ pub struct StealthConfig {
     /// IANA timezone (default: random from common US/EU timezones).
     /// Set to a specific value like "America/New_York" to control the timezone.
     pub timezone: Option<String>,
+    /// Extra Chrome command-line arguments appended after standard stealth args.
+    /// E.g. vec!["--use-fake-ui-for-media-stream".into()] to auto-grant camera.
+    pub extra_args: Vec<String>,
 }
 
 impl Default for StealthConfig {
@@ -151,6 +154,7 @@ impl Default for StealthConfig {
             proxy_password: None,
             cdp_timeout: 30,
             timezone: None, // Random from common timezones
+            extra_args: Vec::new(),
         }
     }
 }

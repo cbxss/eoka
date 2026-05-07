@@ -58,7 +58,11 @@ pub fn discover_pages(host: &str, port: u16) -> Result<Vec<PageTarget>> {
 /// Probe `start..=end` on `127.0.0.1` and return the first port whose Chrome
 /// answers `/json/version`, alongside its WebSocket URL.
 pub fn auto_connect(start: u16, end: u16) -> Option<(u16, String)> {
-    (start..=end).find_map(|port| discover_browser_ws("127.0.0.1", port).ok().map(|u| (port, u)))
+    (start..=end).find_map(|port| {
+        discover_browser_ws("127.0.0.1", port)
+            .ok()
+            .map(|u| (port, u))
+    })
 }
 
 /// Minimal blocking HTTP/1.1 GET. Reads until the server closes the connection.

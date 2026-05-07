@@ -40,7 +40,10 @@ async fn main() -> eoka::Result<()> {
 
     let png = page.screenshot().await?;
     std::fs::write("connected.png", png)?;
-    println!("Wrote connected.png ({} bytes)", std::fs::metadata("connected.png")?.len());
+    println!(
+        "Wrote connected.png ({} bytes)",
+        std::fs::metadata("connected.png")?.len()
+    );
 
     // Note: we do NOT call browser.close() — that would send a Browser.close
     // command to the user's real Chrome and kill it. Just drop the handle.

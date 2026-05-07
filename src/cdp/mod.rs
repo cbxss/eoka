@@ -5,14 +5,16 @@
 //!
 //! ## Stealth Features
 //!
-//! - Blocks detectable commands like `Runtime.enable`
+//! - Blocks detectable commands like `Runtime.enable` (toggle via `Transport::connect_with_options`)
 //! - Warns on risky commands like `Emulation.setUserAgentOverride`
-//! - Uses pipe transport (less detectable than WebSocket)
+//! - Uses a single WebSocket transport over TCP
 
 pub mod connection;
+pub mod discover;
 pub mod transport;
 pub mod types;
 
 pub use connection::{Connection, Session};
+pub use discover::{auto_connect, discover_browser_ws, discover_pages, PageTarget};
 pub use transport::Transport;
 pub use types::*;

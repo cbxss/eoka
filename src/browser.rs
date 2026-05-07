@@ -171,23 +171,33 @@ impl Browser {
     }
 
     /// Connect to an existing Chrome instance at the given WebSocket CDP URL.
-    /// Obtain the URL from `curl http://localhost:9222/json/version`.
-    /// Does not patch the binary or manage the Chrome process.
-    /// Evasion scripts are still injected into new pages.
-    /// Uses default StealthConfig — use `connect_with_config()` to customize.
+    /// Obtain the URL from `curl http://localhost:9222/json/version` or use
+    /// `Browser::connect_port` for HTTP discovery.
+    ///
+    /// Defaults to `StealthConfig::live()` so attaching to a user's real browser
+    /// leaves their tabs untouched (no evasion script injection, full CDP access).
     pub async fn connect(ws_url: &str) -> Result<Self> {
-        Self::connect_with_config(ws_url, StealthConfig::default()).await
+        Self::connect_with_config(ws_url, StealthConfig::live()).await
     }
 
     /// Connect to an existing Chrome instance with a custom config.
     /// Allows customizing CDP timeout, evasion scripts, proxy auth, etc.
     pub async fn connect_with_config(ws_url: &str, config: StealthConfig) -> Result<Self> {
         let config = Arc::new(config);
-        let transport = crate::cdp::transport::Transport::connect(ws_url, config.cdp_timeout)?;
+        let transport = crate::cdp::transport::Transport::connect_with_options(
+            ws_url,
+            config.cdp_timeout,
+            config.filter_cdp,
+        )?;
         let connection = Connection::new(transport);
         let version = connection.version().await?;
         tracing::info!("Connected to Chrome: {}", version.product);
-        let evasion_script = build_evasion_script(&config);
+        // Skip building the evasion script when we won't inject it.
+        let evasion_script = if config.live_session {
+            String::new()
+        } else {
+            build_evasion_script(&config)
+        };
         Ok(Self {
             connection,
             config,
@@ -197,8 +207,23 @@ impl Browser {
         })
     }
 
+    /// Discover the DevTools URL on `127.0.0.1:<port>` and connect.
+    /// Equivalent to `curl http://127.0.0.1:<port>/json/version` then `Browser::connect`.
+    pub async fn connect_port(port: u16) -> Result<Self> {
+        let ws_url = crate::cdp::discover::discover_browser_ws("127.0.0.1", port)?;
+        Self::connect(&ws_url).await
+    }
+
+    /// `connect_port` with a custom config.
+    pub async fn connect_port_with_config(port: u16, config: StealthConfig) -> Result<Self> {
+        let ws_url = crate::cdp::discover::discover_browser_ws("127.0.0.1", port)?;
+        Self::connect_with_config(&ws_url, config).await
+    }
+
     /// Set up a session with evasion scripts and proxy auth.
     /// Common logic shared by new_page, new_blank_page, and attach_page.
+    /// In live-session mode, skips the evasion-script injection so we don't
+    /// pollute the user's tab with extra `addScriptToEvaluateOnNewDocument`.
     async fn setup_session(&self, session: &crate::cdp::Session) -> Result<()> {
         session.page_enable().await?;
 
@@ -206,9 +231,11 @@ impl Browser {
             session.fetch_enable(true).await?;
         }
 
-        session
-            .add_script_to_evaluate_on_new_document(&self.evasion_script)
-            .await?;
+        if !self.config.live_session {
+            session
+                .add_script_to_evaluate_on_new_document(&self.evasion_script)
+                .await?;
+        }
 
         Ok(())
     }
@@ -287,11 +314,17 @@ impl Browser {
         Ok(())
     }
 
-    /// Close the browser
+    /// Close the browser. In live-session mode, this is equivalent to
+    /// `disconnect()` — we never send `Browser.close` to a Chrome we don't own.
     pub async fn close(self) -> Result<()> {
-        self.connection.close().await?;
+        if self.config.live_session {
+            // Don't kill the user's Chrome; just drop the connection.
+            self.connection.transport().close().await?;
+        } else {
+            self.connection.close().await?;
+        }
 
-        // Clean up user data directory
+        // Clean up user data directory (None when connecting)
         if let Some(ref dir) = self.user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -302,6 +335,12 @@ impl Browser {
         }
 
         Ok(())
+    }
+
+    /// Drop the WebSocket without sending `Browser.close`. Use this when
+    /// connected to a user-owned browser to disconnect without killing it.
+    pub async fn disconnect(self) -> Result<()> {
+        self.connection.transport().close().await
     }
 }
 

@@ -131,6 +131,13 @@ pub struct StealthConfig {
     /// Extra Chrome command-line arguments appended after standard stealth args.
     /// E.g. vec!["--use-fake-ui-for-media-stream".into()] to auto-grant camera.
     pub extra_args: Vec<String>,
+    /// Treat this as a session attached to a user-owned browser. When true,
+    /// `Browser::new_page`/`new_blank_page`/`attach_page` skip injecting the
+    /// evasion script. Defaults to false (set automatically by `Browser::connect*`).
+    pub live_session: bool,
+    /// Drop "detectable" CDP commands like `Runtime.enable` silently.
+    /// Defaults to true. Set to false in connect mode to get full DevTools-like control.
+    pub filter_cdp: bool,
 }
 
 impl Default for StealthConfig {
@@ -155,6 +162,8 @@ impl Default for StealthConfig {
             cdp_timeout: 30,
             timezone: None, // Random from common timezones
             extra_args: Vec::new(),
+            live_session: false,
+            filter_cdp: true,
         }
     }
 }
@@ -187,6 +196,27 @@ impl StealthConfig {
         Self {
             headless: false,
             debug: true,
+            ..Default::default()
+        }
+    }
+
+    /// Config tuned for attaching to a user-owned browser via `Browser::connect*`.
+    ///
+    /// Disables anything that touches the user's Chrome state:
+    /// - `live_session` — no evasion script injection on attached tabs
+    /// - `filter_cdp = false` — full DevTools-equivalent CDP access
+    /// - `patch_binary = false` — we don't manage the binary
+    /// - all spoofing off — the user's browser already has its own fingerprint
+    pub fn live() -> Self {
+        Self {
+            live_session: true,
+            filter_cdp: false,
+            patch_binary: false,
+            webgl_spoof: false,
+            canvas_spoof: false,
+            audio_spoof: false,
+            human_mouse: true,
+            human_typing: true,
             ..Default::default()
         }
     }

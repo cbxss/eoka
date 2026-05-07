@@ -182,6 +182,10 @@ pub struct Transport {
     cmd_timeout: std::time::Duration,
     /// Reader thread handle — checked for panics before sending commands
     reader_handle: Option<std::thread::JoinHandle<()>>,
+    /// When true, drop "detectable" commands (`Runtime.enable`, etc.) silently.
+    /// Defaults to true. Disable when you own the browser session and need
+    /// full DevTools-equivalent control.
+    filter_cdp: bool,
 }
 
 /// A parsed CDP message (response or event)
@@ -284,6 +288,7 @@ impl Transport {
         stream: TcpStream,
         proxy_auth: Option<(String, String)>,
         cdp_timeout_secs: u64,
+        filter_cdp: bool,
     ) -> Result<Self> {
         let cmd_timeout = std::time::Duration::from_secs(cdp_timeout_secs);
         tracing::debug!("CDP timeout set to {}s", cdp_timeout_secs);
@@ -319,6 +324,7 @@ impl Transport {
             event_rx: Mutex::new(event_rx),
             cmd_timeout,
             reader_handle: Some(reader_handle),
+            filter_cdp,
         })
     }
 
@@ -330,14 +336,26 @@ impl Transport {
         cdp_timeout_secs: u64,
     ) -> Result<Self> {
         let stream = Self::ws_handshake(ws_url)?;
-        Self::build(Some(child), stream, proxy_auth, cdp_timeout_secs)
+        Self::build(Some(child), stream, proxy_auth, cdp_timeout_secs, true)
     }
 
     /// Connect to an existing Chrome instance at the given WebSocket URL.
     /// Does not manage a Chrome process — caller owns the browser lifecycle.
     pub fn connect(ws_url: &str, cdp_timeout_secs: u64) -> Result<Self> {
         let stream = Self::ws_handshake(ws_url)?;
-        Self::build(None, stream, None, cdp_timeout_secs)
+        Self::build(None, stream, None, cdp_timeout_secs, true)
+    }
+
+    /// Connect to an existing Chrome with full options control. Use
+    /// `filter_cdp = false` to allow `Runtime.enable` and friends — needed
+    /// when driving a user-owned browser where stealth filtering is unwanted.
+    pub fn connect_with_options(
+        ws_url: &str,
+        cdp_timeout_secs: u64,
+        filter_cdp: bool,
+    ) -> Result<Self> {
+        let stream = Self::ws_handshake(ws_url)?;
+        Self::build(None, stream, None, cdp_timeout_secs, filter_cdp)
     }
 
     /// Reader loop - runs in a separate thread to read from WebSocket.
@@ -543,7 +561,7 @@ impl Transport {
         R: DeserializeOwned,
     {
         // STEALTH: Block detectable commands - return empty object (deserializes via #[serde(default)])
-        if is_blocked(method) {
+        if self.filter_cdp && is_blocked(method) {
             tracing::debug!("Blocked CDP command: {}", method);
             return serde_json::from_value(json!({})).map_err(Into::into);
         }

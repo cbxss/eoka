@@ -1,6 +1,6 @@
 [package]
 name = "eoka"
-version = "0.3.14"
+version = "0.3.15"
 edition = "2021"
 license = "MIT"
 description = "Stealth browser automation for Rust. Puppeteer/Playwright alternative with anti-bot bypass."
@@ -60,3 +60,7 @@ path = "examples/request_capture.rs"
 [[example]]
 name = "smoke"
 path = "examples/smoke.rs"
+
+[[example]]
+name = "connect_existing"
+path = "examples/connect_existing.rs"

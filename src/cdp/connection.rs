@@ -123,7 +123,9 @@ impl Connection {
     }
 }
 
-/// A CDP session attached to a specific target
+/// A CDP session attached to a specific target. Cheap to clone (an `Arc` + two
+/// small strings) — clones share the same underlying transport/target.
+#[derive(Clone)]
 pub struct Session {
     transport: Arc<Transport>,
     session_id: String,

@@ -91,12 +91,15 @@ pub enum TextMatch {
     EndsWith,
 }
 
-/// A browser page with stealth capabilities
+/// A browser page with stealth capabilities. Cheap to clone (`Arc`-backed
+/// shared state) — clones refer to the same tab and share the document cache.
+#[derive(Clone)]
 pub struct Page {
     pub(crate) session: Session,
     config: Arc<StealthConfig>,
     /// Cached root `DOM.getDocument` node id (invalidated on navigation).
-    root_node: std::sync::Mutex<Option<i32>>,
+    /// `Arc` so `Element` clones share one page's cache.
+    root_node: Arc<std::sync::Mutex<Option<i32>>>,
     /// Randomized per-page property key for the network-idle request counter.
     net_idle_key: String,
 }
@@ -108,7 +111,7 @@ impl Page {
         Self {
             session,
             config,
-            root_node: std::sync::Mutex::new(None),
+            root_node: Arc::new(std::sync::Mutex::new(None)),
             net_idle_key,
         }
     }
@@ -236,7 +239,7 @@ impl Page {
             .await
     }
     /// Find an element by CSS selector
-    pub async fn find(&self, selector: &str) -> Result<Element<'_>> {
+    pub async fn find(&self, selector: &str) -> Result<Element> {
         let node_id = self
             .with_document(|doc| self.session.query_selector(doc, selector))
             .await?;
@@ -246,13 +249,13 @@ impl Page {
         }
 
         Ok(Element {
-            page: self,
+            page: self.clone(),
             node_id,
         })
     }
 
     /// Find all elements matching a CSS selector
-    pub async fn find_all(&self, selector: &str) -> Result<Vec<Element<'_>>> {
+    pub async fn find_all(&self, selector: &str) -> Result<Vec<Element>> {
         let node_ids = self
             .with_document(|doc| self.session.query_selector_all(doc, selector))
             .await?;
@@ -261,7 +264,7 @@ impl Page {
             .into_iter()
             .filter(|&id| id != 0)
             .map(|node_id| Element {
-                page: self,
+                page: self.clone(),
                 node_id,
             })
             .collect())
@@ -273,7 +276,7 @@ impl Page {
         self.find(selector).await.is_ok()
     }
     /// Find an element by its text content (case-insensitive contains)
-    pub async fn find_by_text(&self, text: &str) -> Result<Element<'_>> {
+    pub async fn find_by_text(&self, text: &str) -> Result<Element> {
         self.find_by_text_match(text, TextMatch::Contains).await
     }
 
@@ -281,11 +284,7 @@ impl Page {
     ///
     /// Prioritizes interactive elements (a, button, input) over static elements.
     /// Uses Runtime.callFunctionOn to avoid mutating the DOM (no marker attributes).
-    pub async fn find_by_text_match(
-        &self,
-        text: &str,
-        match_type: TextMatch,
-    ) -> Result<Element<'_>> {
+    pub async fn find_by_text_match(&self, text: &str, match_type: TextMatch) -> Result<Element> {
         let escaped_text = escape_js_string(text);
         let match_js = match match_type {
             TextMatch::Exact => format!("t.trim() === '{}'", escaped_text),
@@ -344,13 +343,13 @@ impl Page {
         }
 
         Ok(Element {
-            page: self,
+            page: self.clone(),
             node_id,
         })
     }
 
     /// Find all elements matching the given text
-    pub async fn find_all_by_text(&self, text: &str) -> Result<Vec<Element<'_>>> {
+    pub async fn find_all_by_text(&self, text: &str) -> Result<Vec<Element>> {
         let escaped_text = escape_js_string(text).to_lowercase();
 
         let js = format!(
@@ -396,7 +395,7 @@ impl Page {
                 if let Ok(node_id) = self.session.request_node(obj_id).await {
                     if node_id != 0 {
                         elements.push(Element {
-                            page: self,
+                            page: self.clone(),
                             node_id,
                         });
                     }
@@ -479,7 +478,7 @@ impl Page {
     }
 
     /// Shared impl for try_click and try_click_by_text
-    async fn try_click_impl(&self, find_result: Result<Element<'_>>) -> Result<bool> {
+    async fn try_click_impl(&self, find_result: Result<Element>) -> Result<bool> {
         match find_result {
             Ok(element) => match element.click().await {
                 Ok(()) => Ok(true),
@@ -579,7 +578,7 @@ impl Page {
     }
 
     /// Shared impl for try_human_click and try_human_click_by_text
-    async fn try_human_click_impl(&self, find_result: Result<Element<'_>>) -> Result<bool> {
+    async fn try_human_click_impl(&self, find_result: Result<Element>) -> Result<bool> {
         match find_result {
             Ok(element) => match element.center().await {
                 Ok((x, y)) => {
@@ -796,7 +795,7 @@ impl Page {
     }
 
     /// Wait for an element to appear in the DOM
-    pub async fn wait_for(&self, selector: &str, timeout_ms: u64) -> Result<Element<'_>> {
+    pub async fn wait_for(&self, selector: &str, timeout_ms: u64) -> Result<Element> {
         self.poll_until(
             timeout_ms,
             format!("Element '{}' not found within {}ms", selector, timeout_ms),
@@ -806,7 +805,7 @@ impl Page {
     }
 
     /// Wait for an element to be visible and clickable
-    pub async fn wait_for_visible(&self, selector: &str, timeout_ms: u64) -> Result<Element<'_>> {
+    pub async fn wait_for_visible(&self, selector: &str, timeout_ms: u64) -> Result<Element> {
         self.poll_until(
             timeout_ms,
             format!("Element '{}' not visible within {}ms", selector, timeout_ms),
@@ -850,7 +849,7 @@ impl Page {
     }
 
     /// Wait for an element with specific text to appear
-    pub async fn wait_for_text(&self, text: &str, timeout_ms: u64) -> Result<Element<'_>> {
+    pub async fn wait_for_text(&self, text: &str, timeout_ms: u64) -> Result<Element> {
         self.poll_until(
             timeout_ms,
             format!(
@@ -926,7 +925,7 @@ impl Page {
         }
     }
     /// Find the first element matching any of the given selectors
-    pub async fn find_any(&self, selectors: &[&str]) -> Result<Element<'_>> {
+    pub async fn find_any(&self, selectors: &[&str]) -> Result<Element> {
         for selector in selectors {
             if let Ok(element) = self.find(selector).await {
                 return Ok(element);
@@ -941,7 +940,7 @@ impl Page {
     /// Wait for any of the given selectors to appear
     ///
     /// Returns the first selector that matches.
-    pub async fn wait_for_any(&self, selectors: &[&str], timeout_ms: u64) -> Result<Element<'_>> {
+    pub async fn wait_for_any(&self, selectors: &[&str], timeout_ms: u64) -> Result<Element> {
         self.poll_until(
             timeout_ms,
             format!(

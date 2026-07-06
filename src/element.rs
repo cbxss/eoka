@@ -20,13 +20,16 @@ impl BoundingBox {
     }
 }
 
-/// An element on the page (holds a CDP node_id, can become stale on DOM changes)
-pub struct Element<'a> {
-    pub(crate) page: &'a Page,
+/// A handle to a DOM element. Owns a cheap clone of its `Page`, so it is
+/// `'static` — you can store it, return it, and pass it around freely. The
+/// `node_id` can still go stale if the DOM mutates or the page navigates; a
+/// stale handle surfaces as an `ElementNotFound`/`Cdp` error on use.
+pub struct Element {
+    pub(crate) page: Page,
     pub(crate) node_id: i32,
 }
 
-impl<'a> Element<'a> {
+impl Element {
     /// Get the element's center coordinates
     pub async fn center(&self) -> Result<(f64, f64)> {
         let model = self.page.session.get_box_model(self.node_id).await?;
@@ -195,5 +198,18 @@ impl<'a> Element<'a> {
             )
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Element;
+
+    // Element owns its Page, so it must be Send + 'static — storable, returnable,
+    // and movable across await points and tasks. This is the reusability contract.
+    #[test]
+    fn element_is_send_and_static() {
+        fn assert_send_static<T: Send + 'static>() {}
+        assert_send_static::<Element>();
     }
 }

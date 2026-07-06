@@ -14,6 +14,35 @@ cargo run --example detection_test -- --visible  # Visible browser
 cargo run --example request_capture  # HTTP request capture demo
 ```
 
+### Tests & lint
+
+Unit/regression tests are pure logic — no browser required.
+
+```bash
+cargo test --lib                     # all unit + regression tests
+cargo t                              # alias for the above
+cargo test --lib session::           # one module
+cargo test --lib test_cookie_header  # one test (substring match)
+cargo test --lib -- --nocapture      # show test output
+
+cargo fmt                            # format
+cargo fmt --all --check              # verify formatting (CI)
+cargo clippy --all-features -- -D warnings   # lint (CI-equivalent)
+cargo lint                           # alias for the above
+```
+
+Pre-push gate (mirrors CI in `.github/workflows/ci.yml`):
+
+```bash
+cargo fmt --all --check && cargo lint && cargo test --lib
+```
+
+Note: `stealth::patcher::tests::test_find_chrome_returns_elf` fails locally only
+when the system Chrome is a wrapper script (not an ELF). It's guarded by
+`if let Ok(path) = find_chrome()`, so it passes in CI (no Chrome installed) and
+on machines with a real Chrome. Skip it locally with
+`cargo test --lib -- --skip test_find_chrome_returns_elf`.
+
 ## Architecture
 
 ```

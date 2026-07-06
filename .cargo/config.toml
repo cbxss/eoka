@@ -1,0 +1,6 @@
+# Convenience aliases. Run e.g. `cargo lint`, `cargo t`.
+# Cargo aliases wrap a single subcommand; the full pre-push gate is a
+# sequence (fmt + lint + test) — see CLAUDE.md.
+[alias]
+t = "test --lib"
+lint = "clippy --all-features -- -D warnings"

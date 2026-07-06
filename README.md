@@ -14,7 +14,7 @@ Chrome or Chromium installed. eoka launches and controls it via CDP.
 
 ```toml
 [dependencies]
-eoka = "0.3"
+eoka = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 

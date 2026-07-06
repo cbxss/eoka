@@ -30,7 +30,7 @@ async fn main() -> eoka::Result<()> {
 
     let first = tabs
         .first()
-        .ok_or_else(|| eoka::Error::CdpSimple("No open page tabs".into()))?;
+        .ok_or_else(|| eoka::Error::cdp_msg("No open page tabs"))?;
 
     let browser = Browser::connect_port(port).await?;
     let page = browser.attach_page(&first.id).await?;

@@ -810,11 +810,6 @@ pub fn build_evasion_script(config: &StealthConfig) -> String {
     build_evasion_script_for(config, &fp)
 }
 
-/// Get the full evasion script (all options enabled)
-pub fn full_evasion_script() -> String {
-    build_evasion_script(&StealthConfig::default())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

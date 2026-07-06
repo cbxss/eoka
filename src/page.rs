@@ -608,7 +608,7 @@ impl Page {
         let remote = self.check_js_result(result)?;
         let value = remote
             .value
-            .ok_or_else(|| Error::CdpSimple("No value returned from evaluate".into()))?;
+            .ok_or_else(|| Error::cdp_msg("No value returned from evaluate"))?;
         Ok(serde_json::from_value(value)?)
     }
 
@@ -630,7 +630,7 @@ impl Page {
         result: crate::cdp::types::RuntimeEvaluateResult,
     ) -> Result<crate::cdp::types::RemoteObject> {
         if let Some(exception) = result.exception_details {
-            return Err(Error::CdpSimple(format!(
+            return Err(Error::cdp_msg(format!(
                 "JavaScript error: {} at {}:{}",
                 exception.text, exception.line_number, exception.column_number
             )));
@@ -656,7 +656,7 @@ impl Page {
             .set_cookie(name, value, url.as_deref(), domain, path)
             .await?;
         if !success {
-            return Err(Error::CdpSimple("Failed to set cookie".into()));
+            return Err(Error::cdp_msg("Failed to set cookie"));
         }
         Ok(())
     }
@@ -1378,22 +1378,18 @@ mod tests {
 
     #[test]
     fn test_stale_node_error_detection() {
-        let stale = Error::Cdp {
-            method: "DOM.resolveNode".to_string(),
-            code: -32000,
-            message: "Could not find node with given id".to_string(),
-        };
+        let stale = Error::cdp(
+            "DOM.resolveNode",
+            -32000,
+            "Could not find node with given id",
+        );
         assert!(is_stale_node_error(&stale));
         assert!(is_element_cdp_error(&stale));
     }
 
     #[test]
     fn test_box_model_error_is_element_but_not_stale() {
-        let box_model = Error::Cdp {
-            method: "DOM.getBoxModel".to_string(),
-            code: -32000,
-            message: "box model could not be computed".to_string(),
-        };
+        let box_model = Error::cdp("DOM.getBoxModel", -32000, "box model could not be computed");
         // "box model" substring makes it an element error...
         assert!(is_element_cdp_error(&box_model));
         // ...but it is not a stale-node error.

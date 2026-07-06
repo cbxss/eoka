@@ -5,8 +5,11 @@ use thiserror::Error;
 /// Result type for eoka operations
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Error type for eoka
+/// Error type for eoka.
+///
+/// `#[non_exhaustive]`: match with a `_ =>` arm so new variants are additive.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Failed to launch Chrome
     #[error("Failed to launch Chrome: {0}")]
@@ -20,17 +23,14 @@ pub enum Error {
         source: Option<std::io::Error>,
     },
 
-    /// CDP protocol error
-    #[error("CDP error in {method}: {message} (code {code})")]
+    /// CDP protocol error. `method`/`code` carry command context when the error
+    /// came from a command response, and are `None` for context-free failures.
+    #[error(fmt = cdp_fmt)]
     Cdp {
-        method: String,
-        code: i64,
+        method: Option<String>,
+        code: Option<i64>,
         message: String,
     },
-
-    /// CDP error without method context (for simple cases)
-    #[error("CDP error: {0}")]
-    CdpSimple(String),
 
     /// Navigation error
     #[error("Navigation error: {0}")]
@@ -73,6 +73,20 @@ pub enum Error {
     RetryExhausted { attempts: u32, last_error: String },
 }
 
+/// Display for the `Cdp` variant, including method/code context when present.
+fn cdp_fmt(
+    method: &Option<String>,
+    code: &Option<i64>,
+    message: &str,
+    f: &mut std::fmt::Formatter<'_>,
+) -> std::fmt::Result {
+    match (method, code) {
+        (Some(m), Some(c)) => write!(f, "CDP error in {}: {} (code {})", m, message, c),
+        (Some(m), None) => write!(f, "CDP error in {}: {}", m, message),
+        _ => write!(f, "CDP error: {}", message),
+    }
+}
+
 /// Display for the `Transport` variant, including the io error cause when present.
 fn transport_fmt(
     context: &str,
@@ -102,11 +116,20 @@ impl Error {
         }
     }
 
-    /// Create a CDP error with full context
+    /// Create a CDP error with full command context.
     pub fn cdp(method: impl Into<String>, code: i64, message: impl Into<String>) -> Self {
         Self::Cdp {
-            method: method.into(),
-            code,
+            method: Some(method.into()),
+            code: Some(code),
+            message: message.into(),
+        }
+    }
+
+    /// Create a CDP error without command context.
+    pub fn cdp_msg(message: impl Into<String>) -> Self {
+        Self::Cdp {
+            method: None,
+            code: None,
             message: message.into(),
         }
     }
@@ -150,6 +173,17 @@ mod tests {
             err.source().is_some(),
             "transport_io error should expose its io source"
         );
+    }
+
+    #[test]
+    fn test_cdp_display_with_and_without_context() {
+        let full = Error::cdp("DOM.resolveNode", -1, "boom");
+        assert_eq!(
+            format!("{full}"),
+            "CDP error in DOM.resolveNode: boom (code -1)"
+        );
+        let simple = Error::cdp_msg("no value");
+        assert_eq!(format!("{simple}"), "CDP error: no value");
     }
 
     #[test]

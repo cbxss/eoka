@@ -612,11 +612,7 @@ impl Session {
         result
             .object
             .object_id
-            .ok_or_else(|| crate::error::Error::Cdp {
-                method: "DOM.resolveNode".to_string(),
-                code: -1,
-                message: "No object_id returned".to_string(),
-            })
+            .ok_or_else(|| crate::error::Error::cdp("DOM.resolveNode", -1, "No object_id returned"))
     }
 
     /// Call a function on a remote object and return the result by value

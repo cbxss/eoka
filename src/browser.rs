@@ -178,7 +178,7 @@ impl Browser {
                 _ => None,
             };
             let transport =
-                Transport::new_with_options(child, &ws_url, proxy_auth, config.cdp_timeout)?;
+                Transport::new_with_options(child, &ws_url, proxy_auth, config.cdp_timeout).await?;
             let connection = Connection::new(transport);
 
             let version = connection.version().await?;
@@ -225,7 +225,8 @@ impl Browser {
             ws_url,
             config.cdp_timeout,
             config.filter_cdp,
-        )?;
+        )
+        .await?;
         let connection = Connection::new(transport);
         let version = connection.version().await?;
         tracing::info!("Connected to Chrome: {}", version.product);

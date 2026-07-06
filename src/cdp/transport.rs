@@ -1,24 +1,43 @@
 //! CDP Transport Layer
 //!
-//! Handles communication with Chrome via WebSocket.
+//! Handles communication with Chrome via WebSocket (tokio-tungstenite).
 //! Includes built-in filtering to block detectable CDP commands.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::net::TcpStream;
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot, Mutex};
-
-/// Pending requests map - uses std::sync::Mutex because it's accessed from both
-/// a std thread (reader loop) and async contexts, and the lock is held very briefly.
-type PendingMap = std::sync::Mutex<HashMap<u64, PendingRequest>>;
+use tokio::net::TcpStream;
+use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use crate::error::{Error, Result};
+
+/// The connected WebSocket stream and its split write/read halves.
+type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type WsSink = SplitSink<WsStream, Message>;
+type WsSource = SplitStream<WsStream>;
+
+/// Shared write half — used by both `send_impl` and the reader task
+/// (proxy-auth replies, pong frames).
+type SharedSink = Arc<Mutex<WsSink>>;
+
+/// Pending requests map — accessed from both the async reader task and
+/// `send_impl`; the lock is held very briefly so a std Mutex is fine.
+type PendingMap = std::sync::Mutex<HashMap<u64, PendingRequest>>;
+
+/// A pending request waiting for a response
+type PendingRequest = oneshot::Sender<Result<Value>>;
+
+/// Broadcast capacity for CDP events (multi-consumer, lag observable).
+const EVENT_CHANNEL_CAP: usize = 1024;
 
 /// Check if a command should be blocked (highly detectable by anti-bot)
 fn is_blocked(method: &str) -> bool {
@@ -48,166 +67,24 @@ fn is_risky(method: &str) -> bool {
     )
 }
 
-/// A pending request waiting for a response
-type PendingRequest = oneshot::Sender<Result<Value>>;
-
-/// WebSocket message types
-mod ws {
-    pub const OPCODE_CONTINUATION: u8 = 0x0;
-    pub const OPCODE_TEXT: u8 = 0x1;
-    pub const OPCODE_BINARY: u8 = 0x2;
-    pub const OPCODE_CLOSE: u8 = 0x8;
-    pub const OPCODE_PING: u8 = 0x9;
-    pub const OPCODE_PONG: u8 = 0xA;
-}
-
-/// Simple WebSocket frame writer (text opcode)
-fn write_ws_frame(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
-    write_ws_frame_with_opcode(stream, ws::OPCODE_TEXT, data)
-}
-
-/// WebSocket frame writer with explicit opcode
-fn write_ws_frame_with_opcode(
-    stream: &mut TcpStream,
-    opcode: u8,
-    data: &[u8],
-) -> std::io::Result<()> {
-    use std::io::Write;
-
-    let len = data.len();
-    let mut frame = Vec::with_capacity(14 + len);
-
-    // FIN + opcode
-    frame.push(0x80 | opcode);
-
-    // Mask bit set (client must mask), then length
-    if len < 126 {
-        frame.push(0x80 | len as u8);
-    } else if len < 65536 {
-        frame.push(0x80 | 126);
-        frame.push((len >> 8) as u8);
-        frame.push(len as u8);
-    } else {
-        frame.push(0x80 | 127);
-        for i in (0..8).rev() {
-            frame.push((len >> (i * 8)) as u8);
-        }
-    }
-
-    // Random masking key per frame (RFC 6455 compliance)
-    let mask: [u8; 4] = [
-        fastrand::u8(..),
-        fastrand::u8(..),
-        fastrand::u8(..),
-        fastrand::u8(..),
-    ];
-    frame.extend_from_slice(&mask);
-
-    // Masked payload
-    for (i, byte) in data.iter().enumerate() {
-        frame.push(byte ^ mask[i % 4]);
-    }
-
-    stream.write_all(&frame)?;
-    stream.flush()?;
-    Ok(())
-}
-
-/// Read exactly `buf.len()` bytes of a frame in progress; a mid-frame timeout
-/// desyncs the stream, so remap it to a fatal error.
-fn read_frame_bytes(stream: &mut TcpStream, buf: &mut [u8]) -> std::io::Result<()> {
-    use std::io::Read;
-    match stream.read_exact(buf) {
-        Ok(()) => Ok(()),
-        Err(e)
-            if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut =>
-        {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionAborted,
-                format!("mid-frame read timeout (stream desynced): {}", e),
-            ))
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Read a WebSocket frame, returns (fin, opcode, payload). A timeout on the first
-/// header byte is a recoverable idle timeout; mid-frame timeouts are fatal.
-fn read_ws_frame(stream: &mut TcpStream) -> std::io::Result<(bool, u8, Vec<u8>)> {
-    use std::io::Read;
-
-    let mut first = [0u8; 1];
-    stream.read_exact(&mut first)?;
-
-    let mut second = [0u8; 1];
-    read_frame_bytes(stream, &mut second)?;
-
-    let fin = (first[0] & 0x80) != 0;
-    let opcode = first[0] & 0x0F;
-    let masked = (second[0] & 0x80) != 0;
-    let mut len = (second[0] & 0x7F) as usize;
-
-    if len == 126 {
-        let mut ext = [0u8; 2];
-        read_frame_bytes(stream, &mut ext)?;
-        len = ((ext[0] as usize) << 8) | (ext[1] as usize);
-    } else if len == 127 {
-        let mut ext = [0u8; 8];
-        read_frame_bytes(stream, &mut ext)?;
-        const MAX_FRAME_LEN: usize = 256 * 1024 * 1024;
-        len = 0;
-        for byte in ext.iter() {
-            // Use checked_shl to prevent silent overflow on 32-bit platforms
-            len = match len.checked_shl(8) {
-                Some(shifted) => shifted | (*byte as usize),
-                None => MAX_FRAME_LEN + 1, // force the size check below to trigger
-            };
-            if len > MAX_FRAME_LEN {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("WebSocket frame too large: {} bytes", len),
-                ));
-            }
-        }
-    }
-
-    let mask = if masked {
-        let mut m = [0u8; 4];
-        read_frame_bytes(stream, &mut m)?;
-        Some(m)
-    } else {
-        None
-    };
-
-    let mut payload = vec![0u8; len];
-    read_frame_bytes(stream, &mut payload)?;
-
-    if let Some(mask) = mask {
-        for (i, byte) in payload.iter_mut().enumerate() {
-            *byte ^= mask[i % 4];
-        }
-    }
-
-    Ok((fin, opcode, payload))
-}
-
 /// CDP Transport - handles sending commands and receiving responses via WebSocket
 pub struct Transport {
     /// The Chrome child process (None when connecting to an existing instance)
     child: Option<Mutex<Child>>,
-    /// WebSocket stream for writing (shared with proxy auth via Arc)
-    writer: Arc<std::sync::Mutex<TcpStream>>,
+    /// WebSocket write half (shared with the reader task for auth/pong).
+    writer: SharedSink,
     /// Next message ID
     next_id: AtomicU64,
     /// Pending requests waiting for responses
     pending: Arc<PendingMap>,
-    /// Channel to receive parsed messages from the reader task
-    event_rx: Mutex<mpsc::Receiver<CdpMessage>>,
+    /// Broadcasts parsed events to all subscribers.
+    event_tx: broadcast::Sender<CdpMessage>,
+    /// Persistent receiver backing `recv_event`/`try_recv_event` (back-compat).
+    event_rx: Mutex<broadcast::Receiver<CdpMessage>>,
     /// Timeout for CDP commands
     cmd_timeout: std::time::Duration,
-    /// Reader thread handle — checked for panics before sending commands
-    reader_handle: Option<std::thread::JoinHandle<()>>,
+    /// Reader task handle — checked for exit before sending commands.
+    reader_handle: Option<tokio::task::JoinHandle<()>>,
     /// When true, drop "detectable" commands (`Runtime.enable`, etc.) silently.
     /// Defaults to true. Disable when you own the browser session and need
     /// full DevTools-equivalent control.
@@ -215,7 +92,7 @@ pub struct Transport {
 }
 
 /// A parsed CDP message (response or event)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CdpMessage {
     Response {
         id: u64,
@@ -230,139 +107,78 @@ pub enum CdpMessage {
 
 impl Transport {
     /// Create a new transport connecting to Chrome via WebSocket
-    pub fn new(child: Child, ws_url: &str) -> Result<Self> {
-        Self::new_with_options(child, ws_url, None, 30)
+    pub async fn new(child: Child, ws_url: &str) -> Result<Self> {
+        Self::new_with_options(child, ws_url, None, 30).await
     }
 
-    /// Perform WebSocket handshake and return the connected stream.
-    fn ws_handshake(ws_url: &str) -> Result<TcpStream> {
+    /// Connect the WebSocket and return the stream.
+    async fn ws_connect(ws_url: &str) -> Result<WsStream> {
         if !ws_url.starts_with("ws://") {
             return Err(Error::transport(format!(
                 "Invalid WebSocket URL (expected ws://...): {}",
                 ws_url
             )));
         }
-        let url = ws_url.trim_start_matches("ws://");
-        let (host_port, _path) = url.split_once('/').unwrap_or((url, ""));
-
-        let mut stream = TcpStream::connect(host_port)
-            .map_err(|e| Error::transport_io("Failed to connect to Chrome", e))?;
-
-        let path = format!("/{}", url.split_once('/').map(|(_, p)| p).unwrap_or(""));
-        let key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, {
-            let mut buf = [0u8; 16];
-            for b in buf.iter_mut() {
-                *b = fastrand::u8(..);
-            }
-            buf
-        });
-
-        let handshake = format!(
-            "GET {} HTTP/1.1\r\n\
-             Host: {}\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n",
-            path, host_port, key
-        );
-
-        use std::io::{BufRead, Write};
-        stream
-            .write_all(handshake.as_bytes())
-            .map_err(|e| Error::transport_io("Handshake write failed", e))?;
-
-        // Read handshake response until end of HTTP headers.
-        let mut reader = std::io::BufReader::new(&stream);
-        let mut response_buf = Vec::with_capacity(1024);
-        loop {
-            let available = reader
-                .fill_buf()
-                .map_err(|e| Error::transport_io("Handshake read failed", e))?;
-            if available.is_empty() {
-                return Err(Error::transport(
-                    "Connection closed during WebSocket handshake",
-                ));
-            }
-            let len = available.len();
-            response_buf.extend_from_slice(available);
-            reader.consume(len);
-            if response_buf.len() >= 4 && response_buf[response_buf.len() - 4..] == *b"\r\n\r\n" {
-                break;
-            }
-            if response_buf.len() > 8192 {
-                return Err(Error::transport("WebSocket handshake response too large"));
-            }
-        }
-        let response_str = String::from_utf8_lossy(&response_buf);
-
-        if !response_str.starts_with("HTTP/1.1 101") {
-            return Err(Error::transport(format!(
-                "WebSocket handshake failed: {}",
-                response_str
-            )));
-        }
-
+        let (stream, _resp) = connect_async(ws_url)
+            .await
+            .map_err(|e| Error::transport(format!("WebSocket connect failed: {}", e)))?;
         tracing::debug!("WebSocket connected to {}", ws_url);
         Ok(stream)
     }
 
-    /// Spawn the reader thread and build the Transport from a handshaked stream.
+    /// Spawn the reader task and build the Transport from a connected stream.
     fn build(
         child: Option<Child>,
-        stream: TcpStream,
+        stream: WsStream,
         proxy_auth: Option<(String, String)>,
         cdp_timeout_secs: u64,
         filter_cdp: bool,
-    ) -> Result<Self> {
+    ) -> Self {
         let cmd_timeout = std::time::Duration::from_secs(cdp_timeout_secs);
         tracing::debug!("CDP timeout set to {}s", cdp_timeout_secs);
 
-        // Clone stream for reader — set TCP read timeout as safety net
-        let reader_stream = stream
-            .try_clone()
-            .map_err(|e| Error::transport_io("Failed to clone stream", e))?;
-        reader_stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(cdp_timeout_secs * 4)))
-            .map_err(|e| Error::transport_io("Failed to set read timeout", e))?;
-
-        let writer = Arc::new(std::sync::Mutex::new(stream));
-
-        // If proxy auth is configured, share the writer so auth responses
-        // don't race with command writes on the TCP stream.
-        let proxy_auth_writer =
-            proxy_auth.map(|(username, password)| (username, password, Arc::clone(&writer)));
+        let (sink, source) = stream.split();
+        let writer: SharedSink = Arc::new(Mutex::new(sink));
 
         let pending: Arc<PendingMap> = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let (event_tx, event_rx) = mpsc::channel(256);
+        let (event_tx, event_rx) = broadcast::channel(EVENT_CHANNEL_CAP);
 
         let pending_clone = Arc::clone(&pending);
-        let reader_handle = std::thread::spawn(move || {
-            Self::reader_loop(reader_stream, pending_clone, event_tx, proxy_auth_writer);
+        let event_tx_clone = event_tx.clone();
+        let reader_writer = Arc::clone(&writer);
+        let reader_handle = tokio::spawn(async move {
+            Self::reader_loop(
+                source,
+                pending_clone,
+                event_tx_clone,
+                reader_writer,
+                proxy_auth,
+            )
+            .await;
         });
 
-        Ok(Self {
+        Self {
             child: child.map(Mutex::new),
             writer,
             next_id: AtomicU64::new(1),
             pending,
+            event_tx,
             event_rx: Mutex::new(event_rx),
             cmd_timeout,
             reader_handle: Some(reader_handle),
             filter_cdp,
-        })
+        }
     }
 
     /// Create a new transport with proxy auth and configurable CDP timeout.
-    pub fn new_with_options(
+    pub async fn new_with_options(
         mut child: Child,
         ws_url: &str,
         proxy_auth: Option<(String, String)>,
         cdp_timeout_secs: u64,
     ) -> Result<Self> {
-        // Kill the child if the handshake fails, so it can't orphan Chrome.
-        let stream = match Self::ws_handshake(ws_url) {
+        // Kill the child if the connect fails, so it can't orphan Chrome.
+        let stream = match Self::ws_connect(ws_url).await {
             Ok(s) => s,
             Err(e) => {
                 let _ = child.kill();
@@ -370,245 +186,171 @@ impl Transport {
                 return Err(e);
             }
         };
-        Self::build(Some(child), stream, proxy_auth, cdp_timeout_secs, true)
+        Ok(Self::build(
+            Some(child),
+            stream,
+            proxy_auth,
+            cdp_timeout_secs,
+            true,
+        ))
     }
 
     /// Connect to an existing Chrome instance at the given WebSocket URL.
     /// Does not manage a Chrome process — caller owns the browser lifecycle.
-    pub fn connect(ws_url: &str, cdp_timeout_secs: u64) -> Result<Self> {
-        let stream = Self::ws_handshake(ws_url)?;
-        Self::build(None, stream, None, cdp_timeout_secs, true)
+    pub async fn connect(ws_url: &str, cdp_timeout_secs: u64) -> Result<Self> {
+        let stream = Self::ws_connect(ws_url).await?;
+        Ok(Self::build(None, stream, None, cdp_timeout_secs, true))
     }
 
     /// Connect to an existing Chrome with full options control. Use
     /// `filter_cdp = false` to allow `Runtime.enable` and friends — needed
     /// when driving a user-owned browser where stealth filtering is unwanted.
-    pub fn connect_with_options(
+    pub async fn connect_with_options(
         ws_url: &str,
         cdp_timeout_secs: u64,
         filter_cdp: bool,
     ) -> Result<Self> {
-        let stream = Self::ws_handshake(ws_url)?;
-        Self::build(None, stream, None, cdp_timeout_secs, filter_cdp)
+        let stream = Self::ws_connect(ws_url).await?;
+        Ok(Self::build(
+            None,
+            stream,
+            None,
+            cdp_timeout_secs,
+            filter_cdp,
+        ))
     }
 
-    /// Reader loop - runs in a separate thread to read from WebSocket.
-    /// If `proxy_auth` is provided, `Fetch.authRequired` events are automatically
-    /// answered with `Fetch.continueWithAuth` using the given credentials.
-    fn reader_loop(
-        mut stream: TcpStream,
+    /// Reader task — reads CDP messages off the WebSocket. tokio-tungstenite
+    /// handles framing/fragmentation/close; we only reply to pings and parse
+    /// text payloads. If `proxy_auth` is set, `Fetch.authRequired` events are
+    /// auto-answered with `Fetch.continueWithAuth`.
+    async fn reader_loop(
+        mut source: WsSource,
         pending: Arc<PendingMap>,
-        event_tx: mpsc::Sender<CdpMessage>,
-        proxy_auth: Option<(String, String, Arc<std::sync::Mutex<TcpStream>>)>,
+        event_tx: broadcast::Sender<CdpMessage>,
+        writer: SharedSink,
+        proxy_auth: Option<(String, String)>,
     ) {
         let exit_reason;
         // Separate command ID space for auth responses (won't collide with main IDs)
         let mut auth_cmd_id: u64 = u64::MAX / 2;
-        // Track consecutive timeouts to detect a dead connection
-        let mut consecutive_timeouts: u32 = 0;
-        const MAX_CONSECUTIVE_TIMEOUTS: u32 = 3;
-
-        // Reassembly state for fragmented data messages (RFC 6455 §5.4).
-        const MAX_MESSAGE_LEN: usize = 512 * 1024 * 1024;
-        let mut frag_opcode: Option<u8> = None;
-        let mut frag_buf: Vec<u8> = Vec::new();
 
         loop {
-            let (fin, opcode, payload) = match read_ws_frame(&mut stream) {
-                Ok(frame) => {
-                    consecutive_timeouts = 0; // Reset on successful read
-                    frame
-                }
-                Err(e) => {
-                    // Read timeout fired — connection may still be alive.
-                    // Check if there are any pending requests; if so, this is
-                    // suspicious (Chrome should have responded by now).
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut
-                    {
-                        consecutive_timeouts += 1;
-                        let n_pending = pending.lock().unwrap().len();
-                        if n_pending > 0 {
-                            tracing::warn!(
-                                "WebSocket read timeout ({}/{}) with {} pending request(s)",
-                                consecutive_timeouts,
-                                MAX_CONSECUTIVE_TIMEOUTS,
-                                n_pending
-                            );
-                        }
-                        if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
-                            exit_reason = format!(
-                                "WebSocket connection dead: {} consecutive read timeouts",
-                                consecutive_timeouts
-                            );
-                            tracing::error!("{}", exit_reason);
-                            break;
-                        }
-                        continue;
-                    }
-                    exit_reason = format!("WebSocket read error: {}", e);
-                    tracing::debug!("{}", exit_reason);
-                    break;
-                }
-            };
-
-            // Reassemble fragmented data messages; control frames are handled inline.
-            let message: Vec<u8> = match opcode {
-                ws::OPCODE_PING => {
-                    // RFC 6455 §5.5.3: Pong must echo the ping's payload
-                    if let Err(e) =
-                        write_ws_frame_with_opcode(&mut stream, ws::OPCODE_PONG, &payload)
-                    {
-                        exit_reason = format!("Pong write failed: {}", e);
-                        break;
-                    }
+            let text = match source.next().await {
+                Some(Ok(Message::Text(t))) => t,
+                Some(Ok(Message::Binary(b))) => match String::from_utf8(b) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                },
+                Some(Ok(Message::Ping(payload))) => {
+                    // Split streams don't auto-pong; reply via the shared sink.
+                    let mut w = writer.lock().await;
+                    let _ = w.send(Message::Pong(payload)).await;
                     continue;
                 }
-                ws::OPCODE_PONG => continue,
-                ws::OPCODE_CLOSE => {
+                Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => continue,
+                Some(Ok(Message::Close(_))) => {
                     exit_reason = "WebSocket closed by server".to_string();
                     tracing::debug!("{}", exit_reason);
                     break;
                 }
-                ws::OPCODE_TEXT | ws::OPCODE_BINARY => {
-                    if frag_opcode.is_some() {
-                        tracing::warn!(
-                            "New data frame started mid-fragment; discarding partial message"
-                        );
-                        frag_buf.clear();
-                        frag_opcode = None;
-                    }
-                    if fin {
-                        payload
-                    } else {
-                        frag_opcode = Some(opcode);
-                        frag_buf = payload;
-                        continue;
-                    }
+                Some(Err(e)) => {
+                    exit_reason = format!("WebSocket read error: {}", e);
+                    tracing::debug!("{}", exit_reason);
+                    break;
                 }
-                ws::OPCODE_CONTINUATION => {
-                    if frag_opcode.is_none() {
-                        tracing::warn!("Continuation frame with no message in progress; ignoring");
-                        continue;
-                    }
-                    if frag_buf.len() + payload.len() > MAX_MESSAGE_LEN {
-                        exit_reason = format!(
-                            "Reassembled WebSocket message exceeds {} byte cap",
-                            MAX_MESSAGE_LEN
-                        );
-                        tracing::error!("{}", exit_reason);
-                        break;
-                    }
-                    frag_buf.extend_from_slice(&payload);
-                    if fin {
-                        frag_opcode = None;
-                        std::mem::take(&mut frag_buf)
-                    } else {
-                        continue;
-                    }
+                None => {
+                    exit_reason = "WebSocket stream ended".to_string();
+                    tracing::debug!("{}", exit_reason);
+                    break;
                 }
-                _ => continue,
             };
 
-            {
-                let text = match String::from_utf8(message) {
-                    Ok(s) => s,
-                    Err(_) => continue,
+            let msg: Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("Failed to parse CDP message: {} - {}", e, text);
+                    continue;
+                }
+            };
+
+            // Check if response or event
+            if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
+                let result = if let Some(error) = msg.get("error") {
+                    Err(Error::cdp(
+                        msg.get("method")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown"),
+                        error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1),
+                        error
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown"),
+                    ))
+                } else {
+                    Ok(msg.get("result").cloned().unwrap_or(json!({})))
                 };
 
-                let msg: Value = match serde_json::from_str(&text) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!("Failed to parse CDP message: {} - {}", e, text);
-                        continue;
-                    }
-                };
+                let mut pending_guard = pending.lock().unwrap();
+                if let Some(sender) = pending_guard.remove(&id) {
+                    let _ = sender.send(result);
+                } else {
+                    tracing::trace!("Response for unknown id: {}", id);
+                }
+            } else if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
+                let params = msg.get("params").cloned().unwrap_or(json!({}));
+                let session_id = msg
+                    .get("sessionId")
+                    .and_then(|s| s.as_str())
+                    .map(String::from);
 
-                // Check if response or event
-                if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
-                    let result = if let Some(error) = msg.get("error") {
-                        Err(Error::cdp(
-                            msg.get("method")
-                                .and_then(|m| m.as_str())
-                                .unwrap_or("unknown"),
-                            error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1),
-                            error
-                                .get("message")
-                                .and_then(|m| m.as_str())
-                                .unwrap_or("unknown"),
-                        ))
-                    } else {
-                        Ok(msg.get("result").cloned().unwrap_or(json!({})))
-                    };
-
-                    let mut pending_guard = pending.lock().unwrap();
-                    if let Some(sender) = pending_guard.remove(&id) {
-                        let _ = sender.send(result);
-                    } else {
-                        tracing::trace!("Response for unknown id: {}", id);
-                    }
-                } else if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
-                    let params = msg.get("params").cloned().unwrap_or(json!({}));
-                    let session_id = msg
-                        .get("sessionId")
-                        .and_then(|s| s.as_str())
-                        .map(String::from);
-
-                    // Auto-handle proxy auth challenges
-                    if method == "Fetch.authRequired" {
-                        if let Some((ref username, ref password, ref writer)) = proxy_auth {
-                            if let Some(request_id) =
-                                params.get("requestId").and_then(|v| v.as_str())
-                            {
-                                auth_cmd_id += 1;
-                                let mut response = json!({
-                                    "id": auth_cmd_id,
-                                    "method": "Fetch.continueWithAuth",
-                                    "params": {
-                                        "requestId": request_id,
-                                        "authChallengeResponse": {
-                                            "response": "ProvideCredentials",
-                                            "username": username,
-                                            "password": password
-                                        }
-                                    }
-                                });
-                                // Include sessionId if present
-                                if let Some(ref sid) = session_id {
-                                    response["sessionId"] = json!(sid);
-                                }
-                                if let Ok(data) = serde_json::to_string(&response) {
-                                    let mut w = writer.lock().unwrap();
-                                    if let Err(e) = write_ws_frame(&mut w, data.as_bytes()) {
-                                        tracing::error!(
-                                                "Failed to send proxy auth response: {} — connection may be broken",
-                                                e
-                                            );
-                                        exit_reason = format!("Proxy auth write failed: {}", e);
-                                        // Break out of the loop so pending requests
-                                        // get failed immediately instead of hanging.
-                                        break;
-                                    } else {
-                                        tracing::debug!("Auto-responded to proxy auth challenge");
+                // Auto-handle proxy auth challenges
+                if method == "Fetch.authRequired" {
+                    if let Some((ref username, ref password)) = proxy_auth {
+                        if let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) {
+                            auth_cmd_id += 1;
+                            let mut response = json!({
+                                "id": auth_cmd_id,
+                                "method": "Fetch.continueWithAuth",
+                                "params": {
+                                    "requestId": request_id,
+                                    "authChallengeResponse": {
+                                        "response": "ProvideCredentials",
+                                        "username": username,
+                                        "password": password
                                     }
                                 }
-                                continue; // Don't forward to event channel
+                            });
+                            // Include sessionId if present
+                            if let Some(ref sid) = session_id {
+                                response["sessionId"] = json!(sid);
                             }
+                            if let Ok(data) = serde_json::to_string(&response) {
+                                let mut w = writer.lock().await;
+                                if let Err(e) = w.send(Message::Text(data)).await {
+                                    tracing::error!(
+                                        "Failed to send proxy auth response: {} — connection may be broken",
+                                        e
+                                    );
+                                    exit_reason = format!("Proxy auth write failed: {}", e);
+                                    // Break so pending requests fail immediately
+                                    // instead of hanging.
+                                    break;
+                                } else {
+                                    tracing::debug!("Auto-responded to proxy auth challenge");
+                                }
+                            }
+                            continue; // Don't forward to event channel
                         }
                     }
-
-                    if event_tx
-                        .try_send(CdpMessage::Event {
-                            method: method.to_string(),
-                            params,
-                            session_id,
-                        })
-                        .is_err()
-                    {
-                        // Channel full or closed — drop event to avoid blocking reader
-                        tracing::trace!("Event channel full, dropping: {}", method);
-                    }
                 }
+
+                // Publish event; ignore "no active receivers" errors.
+                let _ = event_tx.send(CdpMessage::Event {
+                    method: method.to_string(),
+                    params,
+                    session_id,
+                });
             }
         }
 
@@ -649,11 +391,11 @@ impl Transport {
             tracing::warn!("Risky CDP command (may be detectable): {}", method);
         }
 
-        // Check if the reader thread has died (panicked or exited)
+        // Check if the reader task has died (exited)
         if let Some(ref handle) = self.reader_handle {
             if handle.is_finished() {
                 return Err(Error::transport(
-                    "CDP reader thread has exited — WebSocket connection is dead",
+                    "CDP reader task has exited — WebSocket connection is dead",
                 ));
             }
         }
@@ -682,12 +424,12 @@ impl Transport {
 
         // Write to WebSocket — clean up pending entry on failure
         if let Err(e) = {
-            let mut writer = self.writer.lock().unwrap();
-            write_ws_frame(&mut writer, data.as_bytes())
+            let mut writer = self.writer.lock().await;
+            writer.send(Message::Text(data)).await
         } {
             let mut pending = self.pending.lock().unwrap();
             pending.remove(&id);
-            return Err(Error::transport_io("WebSocket write failed", e));
+            return Err(Error::transport(format!("WebSocket write failed: {}", e)));
         }
 
         tracing::trace!("Sent CDP command: {} (id={})", method, id);
@@ -741,25 +483,49 @@ impl Transport {
         self.send_impl(Some(session_id), method, params).await
     }
 
-    /// Receive the next event from Chrome
-    pub async fn recv_event(&self) -> Option<CdpMessage> {
-        let mut rx = self.event_rx.lock().await;
-        rx.recv().await
+    /// Subscribe to CDP events. Each subscriber gets its own receiver; events
+    /// published after subscribing are delivered to all live receivers.
+    pub fn subscribe(&self) -> broadcast::Receiver<CdpMessage> {
+        self.event_tx.subscribe()
     }
 
-    /// Try to receive an event without blocking
+    /// Receive the next event from Chrome (single-consumer back-compat).
+    /// Skips over lagged notifications and returns the next available event.
+    pub async fn recv_event(&self) -> Option<CdpMessage> {
+        let mut rx = self.event_rx.lock().await;
+        loop {
+            match rx.recv().await {
+                Ok(msg) => return Some(msg),
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Event receiver lagged, skipped {} event(s)", n);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+
+    /// Try to receive an event without blocking (single-consumer back-compat).
     pub async fn try_recv_event(&self) -> Option<CdpMessage> {
         let mut rx = self.event_rx.lock().await;
-        rx.try_recv().ok()
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => return Some(msg),
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    tracing::warn!("Event receiver lagged, skipped {} event(s)", n);
+                    continue;
+                }
+                Err(_) => return None,
+            }
+        }
     }
 
     /// Close the transport and kill Chrome
     pub async fn close(&self) -> Result<()> {
-        // Send WebSocket close frame
+        // Send a WebSocket close frame (best-effort).
         {
-            let mut writer = self.writer.lock().unwrap();
-            let close_frame = vec![0x80 | ws::OPCODE_CLOSE, 0x80, 0, 0, 0, 0];
-            let _ = std::io::Write::write_all(&mut *writer, &close_frame);
+            let mut writer = self.writer.lock().await;
+            let _ = writer.send(Message::Close(None)).await;
         }
 
         if let Some(ref child) = self.child {

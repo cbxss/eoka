@@ -73,6 +73,54 @@ pub enum Error {
     RetryExhausted { attempts: u32, last_error: String },
 }
 
+// `std::io::Error` and `serde_json::Error` aren't `Clone`, so we can't derive it.
+// Reconstruct both best-effort (kind + message) so `Error` — and thus the
+// broadcast `CdpMessage` — is cloneable.
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        use serde::de::Error as _;
+        match self {
+            Self::Launch(s) => Self::Launch(s.clone()),
+            Self::Transport { context, source } => Self::Transport {
+                context: context.clone(),
+                source: source
+                    .as_ref()
+                    .map(|e| std::io::Error::new(e.kind(), e.to_string())),
+            },
+            Self::Cdp {
+                method,
+                code,
+                message,
+            } => Self::Cdp {
+                method: method.clone(),
+                code: *code,
+                message: message.clone(),
+            },
+            Self::Navigation(s) => Self::Navigation(s.clone()),
+            Self::ElementNotFound(s) => Self::ElementNotFound(s.clone()),
+            Self::ElementNotVisible { selector } => Self::ElementNotVisible {
+                selector: selector.clone(),
+            },
+            Self::Timeout(s) => Self::Timeout(s.clone()),
+            Self::Serialization(e) => Self::Serialization(serde_json::Error::custom(e.to_string())),
+            Self::Decode(s) => Self::Decode(s.clone()),
+            Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),
+            Self::ChromeNotFound => Self::ChromeNotFound,
+            Self::Patching { operation, message } => Self::Patching {
+                operation: operation.clone(),
+                message: message.clone(),
+            },
+            Self::RetryExhausted {
+                attempts,
+                last_error,
+            } => Self::RetryExhausted {
+                attempts: *attempts,
+                last_error: last_error.clone(),
+            },
+        }
+    }
+}
+
 /// Display for the `Cdp` variant, including method/code context when present.
 fn cdp_fmt(
     method: &Option<String>,

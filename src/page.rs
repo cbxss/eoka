@@ -332,6 +332,10 @@ impl Page {
             .object_id
             .ok_or_else(|| Error::ElementNotFound(format!("text: {}", text)))?;
 
+        // Prime the DOM node-id space (DOM.requestNode returns 0 unless
+        // DOM.getDocument has populated it for the current document).
+        self.document_node().await?;
+
         // Convert remote object to DOM node_id
         let node_id = self.session.request_node(&object_id).await?;
 
@@ -378,6 +382,9 @@ impl Page {
 
         // Get all indexed properties of the array in one CDP call
         let properties = self.session.get_properties(&array_object_id).await?;
+
+        // Prime the DOM node-id space (DOM.requestNode returns 0 otherwise).
+        self.document_node().await?;
 
         let mut elements = Vec::new();
         for prop in &properties {

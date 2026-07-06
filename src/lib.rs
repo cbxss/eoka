@@ -62,7 +62,9 @@
 
 pub mod browser;
 pub mod cdp;
+pub mod element;
 pub mod error;
+pub mod keyboard;
 pub mod network;
 pub mod page;
 pub mod session;
@@ -80,11 +82,10 @@ const _: () = {
 
 // Re-exports
 pub use browser::{Browser, TabInfo};
+pub use element::{BoundingBox, Element};
 pub use error::{Error, Result};
 pub use network::{NetworkEvent, NetworkWatcher};
-pub use page::{
-    BoundingBox, CapturedRequest, Element, FrameInfo, Page, PageState, ResponseBody, TextMatch,
-};
+pub use page::{CapturedRequest, FrameInfo, Page, PageState, ResponseBody, TextMatch};
 pub use session::{BrowserSession, SessionCookie};
 pub use stealth::{Fingerprint, HumanSpeed};
 

@@ -186,6 +186,25 @@ browser.activate_tab(page1.target_id()).await?;
 browser.close_tab(page2.target_id()).await?;
 ```
 
+### Connect to an existing Chrome
+
+Attach to a browser you already launched with `--remote-debugging-port` instead of
+spawning one. Defaults to `StealthConfig::live()`, so the user's tabs are left
+untouched (no evasion injection).
+
+```rust
+// Start Chrome yourself: chrome --remote-debugging-port=9222
+let browser = Browser::connect_port(9222).await?;           // HTTP discovery
+// or, with the ws:// URL from http://localhost:9222/json/version:
+let browser = Browser::connect("ws://127.0.0.1:9222/devtools/browser/...").await?;
+
+for tab in browser.tabs().await? {
+    println!("{} — {}", tab.title, tab.url);
+}
+let page = browser.attach_page(&target_id).await?;
+browser.disconnect().await?;                                // leaves Chrome running
+```
+
 ### Navigation
 
 ```rust
@@ -254,7 +273,7 @@ Patches Chrome binary, injects 15 evasion scripts, blocks detectable CDP command
 
 ## How it Works
 
-~5K lines of Rust. No chromiumoxide, no puppeteer-extra. Hand-written CDP types for the ~30 commands actually needed. 9 crate dependencies.
+~9K lines of Rust (about 1.3K of that is tests). No chromiumoxide, no puppeteer-extra. Hand-written CDP types for the ~30 commands actually needed. Minimal dependency graph.
 
 ```
 src/

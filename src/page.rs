@@ -7,8 +7,13 @@ use std::sync::Arc;
 
 use crate::cdp::{Cookie, MouseButton, MouseEventType, Session};
 use crate::error::{Error, Result};
+use crate::keyboard::{key_to_codes, parse_key_combo};
 use crate::stealth::Human;
 use crate::StealthConfig;
+
+// Re-export so the historical `eoka::page::Element` / `eoka::page::BoundingBox`
+// paths keep resolving after the split into `element.rs`.
+pub use crate::element::{BoundingBox, Element};
 
 /// Polling interval (ms) used by wait_for_* loop iterations.
 const POLL_INTERVAL_MS: u64 = 100;
@@ -18,10 +23,10 @@ const POLL_INTERVAL_MS: u64 = 100;
 const SETTLE_MS: u64 = 100;
 
 /// Brief pause (ms) between micro-interactions (e.g. focus→type, select_all→delete).
-const INTERACTION_DELAY_MS: u64 = 50;
+pub(crate) const INTERACTION_DELAY_MS: u64 = 50;
 
 /// Async sleep for the given number of milliseconds.
-async fn sleep_ms(ms: u64) {
+pub(crate) async fn sleep_ms(ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
 }
 
@@ -88,7 +93,7 @@ pub enum TextMatch {
 
 /// A browser page with stealth capabilities
 pub struct Page {
-    session: Session,
+    pub(crate) session: Session,
     config: Arc<StealthConfig>,
     /// Cached root `DOM.getDocument` node id (invalidated on navigation).
     root_node: std::sync::Mutex<Option<i32>>,
@@ -1264,94 +1269,6 @@ impl Page {
     }
 }
 
-fn parse_key_combo(combo: &str) -> (i32, &str) {
-    use crate::cdp::types::modifiers;
-    let parts: Vec<&str> = combo.split('+').collect();
-    let mut mods = 0;
-    let mut key = combo;
-    for (i, part) in parts.iter().enumerate() {
-        match part.to_lowercase().as_str() {
-            "ctrl" | "control" => mods |= modifiers::CTRL,
-            "alt" | "option" => mods |= modifiers::ALT,
-            "shift" => mods |= modifiers::SHIFT,
-            "cmd" | "meta" | "command" => mods |= modifiers::META,
-            _ => key = parts[i],
-        }
-    }
-    if key.is_empty() {
-        key = "+";
-    }
-    (mods, key)
-}
-
-fn key_to_codes(key: &str) -> (&str, &str, Option<i32>) {
-    static KEYS: &[(&str, &str, &str, i32)] = &[
-        ("enter", "Enter", "Enter", 13),
-        ("return", "Enter", "Enter", 13),
-        ("tab", "Tab", "Tab", 9),
-        ("escape", "Escape", "Escape", 27),
-        ("esc", "Escape", "Escape", 27),
-        ("backspace", "Backspace", "Backspace", 8),
-        ("delete", "Delete", "Delete", 46),
-        ("arrowup", "ArrowUp", "ArrowUp", 38),
-        ("up", "ArrowUp", "ArrowUp", 38),
-        ("arrowdown", "ArrowDown", "ArrowDown", 40),
-        ("down", "ArrowDown", "ArrowDown", 40),
-        ("arrowleft", "ArrowLeft", "ArrowLeft", 37),
-        ("left", "ArrowLeft", "ArrowLeft", 37),
-        ("arrowright", "ArrowRight", "ArrowRight", 39),
-        ("right", "ArrowRight", "ArrowRight", 39),
-        ("home", "Home", "Home", 36),
-        ("end", "End", "End", 35),
-        ("pageup", "PageUp", "PageUp", 33),
-        ("pagedown", "PageDown", "PageDown", 34),
-        ("space", " ", "Space", 32),
-        ("a", "a", "KeyA", 65),
-        ("b", "b", "KeyB", 66),
-        ("c", "c", "KeyC", 67),
-        ("d", "d", "KeyD", 68),
-        ("e", "e", "KeyE", 69),
-        ("f", "f", "KeyF", 70),
-        ("g", "g", "KeyG", 71),
-        ("h", "h", "KeyH", 72),
-        ("i", "i", "KeyI", 73),
-        ("j", "j", "KeyJ", 74),
-        ("k", "k", "KeyK", 75),
-        ("l", "l", "KeyL", 76),
-        ("m", "m", "KeyM", 77),
-        ("n", "n", "KeyN", 78),
-        ("o", "o", "KeyO", 79),
-        ("p", "p", "KeyP", 80),
-        ("q", "q", "KeyQ", 81),
-        ("r", "r", "KeyR", 82),
-        ("s", "s", "KeyS", 83),
-        ("t", "t", "KeyT", 84),
-        ("u", "u", "KeyU", 85),
-        ("v", "v", "KeyV", 86),
-        ("w", "w", "KeyW", 87),
-        ("x", "x", "KeyX", 88),
-        ("y", "y", "KeyY", 89),
-        ("z", "z", "KeyZ", 90),
-        ("f1", "F1", "F1", 112),
-        ("f2", "F2", "F2", 113),
-        ("f3", "F3", "F3", 114),
-        ("f4", "F4", "F4", 115),
-        ("f5", "F5", "F5", 116),
-        ("f6", "F6", "F6", 117),
-        ("f7", "F7", "F7", 118),
-        ("f8", "F8", "F8", 119),
-        ("f9", "F9", "F9", 120),
-        ("f10", "F10", "F10", 121),
-        ("f11", "F11", "F11", 122),
-        ("f12", "F12", "F12", 123),
-    ];
-    let lower = key.to_lowercase();
-    KEYS.iter()
-        .find(|(name, _, _, _)| *name == lower)
-        .map(|(_, k, c, vk)| (*k, *c, Some(*vk)))
-        .unwrap_or((key, key, None))
-}
-
 /// A captured HTTP request with its response
 #[derive(Debug, Clone)]
 pub struct CapturedRequest {
@@ -1416,308 +1333,9 @@ pub struct PageState {
     pub form_count: u32,
 }
 
-/// Bounding box of an element
-#[derive(Debug, Clone, Copy)]
-pub struct BoundingBox {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-impl BoundingBox {
-    pub fn center(&self) -> (f64, f64) {
-        (self.x + self.width / 2.0, self.y + self.height / 2.0)
-    }
-}
-
-/// An element on the page (holds a CDP node_id, can become stale on DOM changes)
-pub struct Element<'a> {
-    page: &'a Page,
-    node_id: i32,
-}
-
-impl<'a> Element<'a> {
-    /// Get the element's center coordinates
-    pub async fn center(&self) -> Result<(f64, f64)> {
-        let model = self.page.session.get_box_model(self.node_id).await?;
-        model.try_center().ok_or_else(|| Error::ElementNotVisible {
-            selector: format!("node {}", self.node_id),
-        })
-    }
-
-    /// Click this element
-    pub async fn click(&self) -> Result<()> {
-        let (x, y) = self.center().await?;
-        self.page.click_at(x, y).await
-    }
-
-    /// Human-like click
-    pub async fn human_click(&self) -> Result<()> {
-        let (x, y) = self.center().await?;
-        self.page.human().move_and_click(x, y).await
-    }
-
-    /// Get outer HTML
-    pub async fn outer_html(&self) -> Result<String> {
-        self.page.session.get_outer_html(self.node_id).await
-    }
-
-    /// Get inner text
-    ///
-    /// Extracts text content from the element's outerHTML without using focus.
-    pub async fn text(&self) -> Result<String> {
-        self.eval_str("this.textContent || ''").await
-    }
-
-    /// Evaluate a JavaScript expression on this element via Runtime.callFunctionOn.
-    ///
-    /// The expression should use `this` to refer to the element.
-    /// Example: `"this.textContent || ''"`, `"this.tagName.toLowerCase()"`
-    async fn eval_on_element(&self, js_body: &str) -> Result<serde_json::Value> {
-        let object_id = self.page.session.resolve_node(self.node_id).await?;
-        let func = format!("function() {{ return {}; }}", js_body);
-        let result = self
-            .page
-            .session
-            .call_function_on(&object_id, &func)
-            .await?;
-        Ok(result.result.value.unwrap_or(serde_json::Value::Null))
-    }
-
-    /// Evaluate JS on element, return as String (empty string on null/non-string)
-    async fn eval_str(&self, js_body: &str) -> Result<String> {
-        let value = self.eval_on_element(js_body).await?;
-        Ok(value.as_str().unwrap_or("").to_string())
-    }
-
-    /// Evaluate JS on element, return as bool with a default
-    async fn eval_bool(&self, js_body: &str, default: bool) -> Result<bool> {
-        let value = self.eval_on_element(js_body).await?;
-        Ok(value.as_bool().unwrap_or(default))
-    }
-
-    /// Type text into this element
-    pub async fn type_text(&self, text: &str) -> Result<()> {
-        self.click().await?;
-        sleep_ms(INTERACTION_DELAY_MS).await;
-        self.page.session.insert_text(text).await
-    }
-
-    /// Focus this element
-    pub async fn focus(&self) -> Result<()> {
-        self.page.session.focus(self.node_id).await
-    }
-    /// Check if the element is visible (has a computable box model)
-    pub async fn is_visible(&self) -> Result<bool> {
-        match self.page.session.get_box_model(self.node_id).await {
-            Ok(_) => Ok(true),
-            Err(Error::Cdp { message, .. }) if message.contains("box model") => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Get the element's bounding box
-    ///
-    /// Returns None if the element is not visible/rendered.
-    pub async fn bounding_box(&self) -> Option<BoundingBox> {
-        match self.page.session.get_box_model(self.node_id).await {
-            Ok(model) => {
-                let content = &model.content;
-                if content.len() >= 8 {
-                    // content is [x1,y1, x2,y2, x3,y3, x4,y4] for a quad
-                    // Handle rotated/transformed elements by finding actual bounds
-                    let xs = [content[0], content[2], content[4], content[6]];
-                    let ys = [content[1], content[3], content[5], content[7]];
-
-                    let min_x = xs.iter().copied().fold(f64::INFINITY, f64::min);
-                    let max_x = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                    let min_y = ys.iter().copied().fold(f64::INFINITY, f64::min);
-                    let max_y = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-
-                    Some(BoundingBox {
-                        x: min_x,
-                        y: min_y,
-                        width: max_x - min_x,
-                        height: max_y - min_y,
-                    })
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
-        }
-    }
-
-    /// Get an attribute value
-    pub async fn get_attribute(&self, name: &str) -> Result<Option<String>> {
-        let escaped_name = escape_js_string(name);
-        let value = self
-            .eval_on_element(&format!("this.getAttribute('{}')", escaped_name))
-            .await?;
-
-        if value.is_null() {
-            return Ok(None);
-        }
-        if let Some(s) = value.as_str() {
-            return Ok(Some(s.to_string()));
-        }
-        Ok(None)
-    }
-
-    /// Get the tag name of the element (e.g., "div", "input", "a")
-    pub async fn tag_name(&self) -> Result<String> {
-        self.eval_str("this.tagName.toLowerCase()").await
-    }
-
-    /// Check if the element is enabled (not disabled)
-    pub async fn is_enabled(&self) -> Result<bool> {
-        self.eval_bool("!this.disabled", true).await
-    }
-
-    /// Check if a checkbox/radio is checked
-    pub async fn is_checked(&self) -> Result<bool> {
-        self.eval_bool("this.checked === true", false).await
-    }
-
-    /// Get the value of an input element
-    pub async fn value(&self) -> Result<String> {
-        self.eval_str("this.value || ''").await
-    }
-
-    /// Get computed CSS property value
-    pub async fn css(&self, property: &str) -> Result<String> {
-        let escaped = escape_js_string(property);
-        self.eval_str(&format!(
-            "getComputedStyle(this).getPropertyValue('{}')",
-            escaped
-        ))
-        .await
-    }
-
-    /// Scroll this element into view
-    pub async fn scroll_into_view(&self) -> Result<()> {
-        let object_id = self.page.session.resolve_node(self.node_id).await?;
-        self.page
-            .session
-            .call_function_on(
-                &object_id,
-                "function() { this.scrollIntoView({ behavior: 'smooth', block: 'center' }); }",
-            )
-            .await?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_key_combo_simple() {
-        let (mods, key) = parse_key_combo("Enter");
-        assert_eq!(mods, 0);
-        assert_eq!(key, "Enter");
-    }
-
-    #[test]
-    fn test_parse_key_combo_ctrl() {
-        use crate::cdp::types::modifiers;
-        let (mods, key) = parse_key_combo("Ctrl+A");
-        assert_eq!(mods, modifiers::CTRL);
-        assert_eq!(key, "A");
-    }
-
-    #[test]
-    fn test_parse_key_combo_cmd_shift() {
-        use crate::cdp::types::modifiers;
-        let (mods, key) = parse_key_combo("Cmd+Shift+S");
-        assert_eq!(mods, modifiers::META | modifiers::SHIFT);
-        assert_eq!(key, "S");
-    }
-
-    #[test]
-    fn test_parse_key_combo_all_modifiers() {
-        use crate::cdp::types::modifiers;
-        let (mods, key) = parse_key_combo("Ctrl+Alt+Shift+Cmd+X");
-        assert_eq!(
-            mods,
-            modifiers::CTRL | modifiers::ALT | modifiers::SHIFT | modifiers::META
-        );
-        assert_eq!(key, "X");
-    }
-
-    #[test]
-    fn test_parse_key_combo_case_insensitive() {
-        use crate::cdp::types::modifiers;
-        let (mods, key) = parse_key_combo("ctrl+a");
-        assert_eq!(mods, modifiers::CTRL);
-        assert_eq!(key, "a");
-    }
-
-    #[test]
-    fn test_key_to_codes_enter() {
-        let (key, code, vk) = key_to_codes("Enter");
-        assert_eq!(key, "Enter");
-        assert_eq!(code, "Enter");
-        assert_eq!(vk, Some(13));
-    }
-
-    #[test]
-    fn test_key_to_codes_tab() {
-        let (key, code, vk) = key_to_codes("Tab");
-        assert_eq!(key, "Tab");
-        assert_eq!(code, "Tab");
-        assert_eq!(vk, Some(9));
-    }
-
-    #[test]
-    fn test_key_to_codes_letter() {
-        let (key, code, vk) = key_to_codes("a");
-        assert_eq!(key, "a");
-        assert_eq!(code, "KeyA");
-        assert_eq!(vk, Some(65));
-    }
-
-    #[test]
-    fn test_key_to_codes_arrow() {
-        let (key, code, vk) = key_to_codes("ArrowDown");
-        assert_eq!(key, "ArrowDown");
-        assert_eq!(code, "ArrowDown");
-        assert_eq!(vk, Some(40));
-    }
-
-    #[test]
-    fn test_key_to_codes_case_insensitive() {
-        let (key, code, vk) = key_to_codes("ESCAPE");
-        assert_eq!(key, "Escape");
-        assert_eq!(code, "Escape");
-        assert_eq!(vk, Some(27));
-    }
-
-    #[test]
-    fn test_key_to_codes_alias() {
-        // "esc" should work as alias for "Escape"
-        let (key, code, vk) = key_to_codes("esc");
-        assert_eq!(key, "Escape");
-        assert_eq!(code, "Escape");
-        assert_eq!(vk, Some(27));
-
-        // "up" should work as alias for "ArrowUp"
-        let (key, code, vk) = key_to_codes("up");
-        assert_eq!(key, "ArrowUp");
-        assert_eq!(code, "ArrowUp");
-        assert_eq!(vk, Some(38));
-    }
-
-    #[test]
-    fn test_key_to_codes_unknown() {
-        // Unknown keys should pass through
-        let (key, code, vk) = key_to_codes("SomeWeirdKey");
-        assert_eq!(key, "SomeWeirdKey");
-        assert_eq!(code, "SomeWeirdKey");
-        assert_eq!(vk, None);
-    }
 
     #[test]
     fn test_escape_js_string() {
@@ -1756,23 +1374,6 @@ mod tests {
         assert_eq!(escape_js_string("${"), "\\${");
         assert_eq!(escape_js_string("\u{2028}"), "\\u2028");
         assert_eq!(escape_js_string("\u{2029}"), "\\u2029");
-    }
-
-    #[test]
-    fn test_parse_key_combo_literal_plus() {
-        // A lone "+" is a literal key, not a separator artifact.
-        let (mods, key) = parse_key_combo("+");
-        assert_eq!(mods, 0);
-        assert_eq!(key, "+");
-    }
-
-    #[test]
-    fn test_parse_key_combo_shift_plus() {
-        // "Shift++" is SHIFT modifier plus the literal "+" key.
-        use crate::cdp::types::modifiers;
-        let (mods, key) = parse_key_combo("Shift++");
-        assert_eq!(mods, modifiers::SHIFT);
-        assert_eq!(key, "+");
     }
 
     #[test]

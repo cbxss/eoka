@@ -479,14 +479,21 @@ pub struct BoxModel {
 }
 
 impl BoxModel {
-    pub fn center(&self) -> (f64, f64) {
+    /// Center of the content quad, or `None` if the box model is degenerate.
+    pub fn try_center(&self) -> Option<(f64, f64)> {
         if self.content.len() >= 8 {
             let x = (self.content[0] + self.content[2] + self.content[4] + self.content[6]) / 4.0;
             let y = (self.content[1] + self.content[3] + self.content[5] + self.content[7]) / 4.0;
-            (x, y)
+            Some((x, y))
         } else {
-            (0.0, 0.0)
+            None
         }
+    }
+
+    /// Center of the content quad, or `(0.0, 0.0)` when unavailable.
+    #[deprecated(note = "use `try_center` — a silent (0,0) clicks the viewport corner")]
+    pub fn center(&self) -> (f64, f64) {
+        self.try_center().unwrap_or((0.0, 0.0))
     }
 }
 
@@ -729,7 +736,30 @@ pub struct PageSetBypassCSP {
     pub enabled: bool,
 }
 
-/// Emulation.setUserAgentOverride — override the User-Agent / Accept-Language strings
+/// A single (brand, version) entry in `Sec-CH-UA` client-hint brand lists.
+#[derive(Debug, Clone, Serialize)]
+pub struct UserAgentBrandVersion {
+    pub brand: String,
+    pub version: String,
+}
+
+/// Emulation.UserAgentMetadata — drives the `Sec-CH-UA*` client-hint headers.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserAgentMetadata {
+    pub brands: Vec<UserAgentBrandVersion>,
+    pub full_version_list: Vec<UserAgentBrandVersion>,
+    pub platform: String,
+    pub platform_version: String,
+    pub architecture: String,
+    pub model: String,
+    pub mobile: bool,
+    pub bitness: String,
+    pub wow64: bool,
+}
+
+/// Emulation.setUserAgentOverride — override the User-Agent / Accept-Language
+/// strings and (optionally) the client-hint metadata.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmulationSetUserAgentOverride {
@@ -738,6 +768,8 @@ pub struct EmulationSetUserAgentOverride {
     pub accept_language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent_metadata: Option<UserAgentMetadata>,
 }
 
 /// Security.setIgnoreCertificateErrors — bypass TLS errors for this session
@@ -831,4 +863,106 @@ pub struct FetchFailRequest {
     pub request_id: String,
     /// CDP NetworkErrorReason, e.g. "Aborted", "AccessDenied", "AddressUnreachable"
     pub error_reason: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_box_model_try_center_valid_quad() {
+        let bm = BoxModel {
+            content: vec![0.0, 0.0, 10.0, 0.0, 10.0, 20.0, 0.0, 20.0],
+        };
+        assert_eq!(bm.try_center(), Some((5.0, 10.0)));
+    }
+
+    #[test]
+    fn test_box_model_try_center_empty_is_none() {
+        let bm = BoxModel::default();
+        assert!(bm.content.is_empty());
+        assert_eq!(bm.try_center(), None);
+    }
+
+    #[test]
+    fn test_box_model_try_center_too_short_is_none() {
+        // Fewer than 8 coordinates → degenerate → None.
+        let bm = BoxModel {
+            content: vec![0.0, 0.0, 10.0, 0.0, 10.0, 20.0],
+        };
+        assert_eq!(bm.try_center(), None);
+    }
+
+    #[test]
+    fn test_ua_override_skips_none_fields() {
+        let cmd = EmulationSetUserAgentOverride {
+            user_agent: "UA/1.0".to_string(),
+            accept_language: None,
+            platform: None,
+            user_agent_metadata: None,
+        };
+        let value = serde_json::to_value(&cmd).unwrap();
+        // Only the userAgent key is present; skip_serializing_if drops the rest.
+        assert_eq!(value, json!({ "userAgent": "UA/1.0" }));
+    }
+
+    #[test]
+    fn test_ua_override_includes_camel_case_fields_when_set() {
+        let cmd = EmulationSetUserAgentOverride {
+            user_agent: "UA/1.0".to_string(),
+            accept_language: Some("en-US".to_string()),
+            platform: Some("Linux".to_string()),
+            user_agent_metadata: Some(UserAgentMetadata {
+                brands: vec![],
+                full_version_list: vec![],
+                platform: "Linux".to_string(),
+                platform_version: "6.0".to_string(),
+                architecture: "x86".to_string(),
+                model: "".to_string(),
+                mobile: false,
+                bitness: "64".to_string(),
+                wow64: false,
+            }),
+        };
+        let value = serde_json::to_value(&cmd).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(obj.contains_key("userAgent"));
+        assert!(obj.contains_key("acceptLanguage"));
+        assert!(obj.contains_key("platform"));
+        assert!(obj.contains_key("userAgentMetadata"));
+    }
+
+    #[test]
+    fn test_ua_metadata_camel_case_keys() {
+        let meta = UserAgentMetadata {
+            brands: vec![],
+            full_version_list: vec![],
+            platform: "Linux".to_string(),
+            platform_version: "6.0".to_string(),
+            architecture: "x86".to_string(),
+            model: "".to_string(),
+            mobile: true,
+            bitness: "64".to_string(),
+            wow64: false,
+        };
+        let value = serde_json::to_value(&meta).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(obj.contains_key("fullVersionList"));
+        assert!(obj.contains_key("platformVersion"));
+        assert!(obj.contains_key("mobile"));
+        assert!(obj.contains_key("bitness"));
+        assert!(obj.contains_key("wow64"));
+        assert_eq!(obj.get("mobile"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn test_ua_brand_version_serialization() {
+        let bv = UserAgentBrandVersion {
+            brand: "Chromium".to_string(),
+            version: "120".to_string(),
+        };
+        let value = serde_json::to_value(&bv).unwrap();
+        assert_eq!(value, json!({ "brand": "Chromium", "version": "120" }));
+    }
 }

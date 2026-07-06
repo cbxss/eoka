@@ -3,22 +3,56 @@
 //! These scripts are injected before any page content loads to patch
 //! detectable browser properties.
 
+use crate::page::escape_js_string;
+use crate::stealth::fingerprint::Fingerprint;
 use crate::StealthConfig;
+
+/// Native-function masking: makes `_eoka_mark`ed functions report native code from `.toString()`.
+pub const NATIVE_TOSTRING_EVASION: &str = r#"
+const _eoka_spoofed = new WeakMap();
+const _eoka_origToString = Function.prototype.toString;
+const _eoka_mark = (fn, name) => {
+    if (typeof fn === 'function') {
+        _eoka_spoofed.set(fn, name || fn.name || '');
+    }
+    return fn;
+};
+const _eoka_toStringProxy = new Proxy(_eoka_origToString, {
+    apply(target, thisArg, args) {
+        if (typeof thisArg === 'function' && _eoka_spoofed.has(thisArg)) {
+            const name = _eoka_spoofed.get(thisArg);
+            return name ? 'function ' + name + '() { [native code] }'
+                        : 'function () { [native code] }';
+        }
+        if (thisArg === _eoka_toStringProxy) {
+            return 'function toString() { [native code] }';
+        }
+        return Reflect.apply(target, thisArg, args);
+    }
+});
+Function.prototype.toString = _eoka_toStringProxy;
+_eoka_mark(Function.prototype.toString, 'toString');
+
+// Deterministic per-session PRNG (LCG), seeded from Rust.
+const _eoka_lcg = (s) => (Math.imul(s >>> 0, 1664525) + 1013904223) >>> 0;
+let _eoka_seed = (__EOKA_NOISE_SEED__ >>> 0) || 1;
+const _eoka_rand = () => {
+    _eoka_seed = _eoka_lcg(_eoka_seed);
+    return _eoka_seed / 4294967296;
+};
+"#;
 
 /// Core WebDriver evasion - define webdriver=false on prototype (more realistic)
 pub const WEBDRIVER_EVASION: &str = r#"
-// Define webdriver as false on Navigator.prototype (this is what chaser-oxide does)
-// Using false instead of undefined is more realistic for a normal browser
+const _eoka_webdriverGet = _eoka_mark(() => false, 'get webdriver');
 Object.defineProperty(Object.getPrototypeOf(navigator), 'webdriver', {
-    get: () => false,
+    get: _eoka_webdriverGet,
     configurable: true,
     enumerable: true
 });
-
-// Also set on Navigator.prototype directly for good measure
 try {
     Object.defineProperty(Navigator.prototype, 'webdriver', {
-        get: () => false,
+        get: _eoka_webdriverGet,
         configurable: true,
         enumerable: true
     });
@@ -49,27 +83,6 @@ if (window.chrome && window.chrome.runtime) {
     try {
         delete window.chrome.runtime.bindingsCalled;
     } catch(e) {}
-}
-
-// Hide automation in Error.stack traces
-const originalStackDescriptor = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
-if (originalStackDescriptor && originalStackDescriptor.get) {
-    Object.defineProperty(Error.prototype, 'stack', {
-        get: function() {
-            let stack = originalStackDescriptor.get.call(this);
-            if (typeof stack === 'string') {
-                stack = stack.split('\n').filter(line =>
-                    !line.includes('__puppeteer') &&
-                    !line.includes('devtools://') &&
-                    !line.includes('chrome-extension://') &&
-                    !line.includes('__selenium') &&
-                    !line.includes('__webdriver')
-                ).join('\n');
-            }
-            return stack;
-        },
-        configurable: true
-    });
 }
 "#;
 
@@ -102,46 +115,46 @@ cleanupDocument();
 
 // Override Object.getOwnPropertyNames to filter out CDP markers
 const originalGetOwnPropertyNames = Object.getOwnPropertyNames;
-Object.getOwnPropertyNames = function(obj) {
+Object.getOwnPropertyNames = _eoka_mark(function getOwnPropertyNames(obj) {
     const names = originalGetOwnPropertyNames.call(this, obj);
     if (obj === window || obj === document) {
         return names.filter(name => !cdcPattern.test(name));
     }
     return names;
-};
+}, 'getOwnPropertyNames');
 
 // Override Object.keys to filter out CDP markers
 const originalKeys = Object.keys;
-Object.keys = function(obj) {
+Object.keys = _eoka_mark(function keys(obj) {
     const keys = originalKeys.call(this, obj);
     if (obj === window || obj === document) {
         return keys.filter(key => !cdcPattern.test(key));
     }
     return keys;
-};
+}, 'keys');
 
 // Override hasOwnProperty to hide CDP markers
 const originalHasOwnProperty = Object.prototype.hasOwnProperty;
-Object.prototype.hasOwnProperty = function(prop) {
+Object.prototype.hasOwnProperty = _eoka_mark(function hasOwnProperty(prop) {
     if ((this === window || this === document) && cdcPattern.test(prop)) {
         return false;
     }
     return originalHasOwnProperty.call(this, prop);
-};
+}, 'hasOwnProperty');
 
 // Override Object.getOwnPropertyDescriptor to hide CDP markers
 const originalGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-Object.getOwnPropertyDescriptor = function(obj, prop) {
+Object.getOwnPropertyDescriptor = _eoka_mark(function getOwnPropertyDescriptor(obj, prop) {
     if ((obj === window || obj === document) && cdcPattern.test(prop)) {
         return undefined;
     }
     return originalGetOwnPropertyDescriptor.call(this, obj, prop);
-};
+}, 'getOwnPropertyDescriptor');
 
-// Intercept direct property access on document using getter override
+// Intercept direct property access on document using a Proxy (bound fns cached for stable identity).
 const realDocument = document;
+const _eoka_boundCache = new WeakMap();
 try {
-    // Create property access interceptor for document
     const documentProxy = new Proxy(realDocument, {
         get(target, prop, receiver) {
             if (typeof prop === 'string' && cdcPattern.test(prop)) {
@@ -149,7 +162,10 @@ try {
             }
             const value = Reflect.get(target, prop, target);
             if (typeof value === 'function') {
-                return value.bind(target);
+                let cache = _eoka_boundCache.get(target);
+                if (!cache) { cache = new Map(); _eoka_boundCache.set(target, cache); }
+                if (!cache.has(prop)) cache.set(prop, value.bind(target));
+                return cache.get(prop);
             }
             return value;
         },
@@ -173,11 +189,10 @@ try {
     });
 
     Object.defineProperty(window, 'document', {
-        get: () => documentProxy,
+        get: _eoka_mark(() => documentProxy, 'get document'),
         configurable: true
     });
 } catch(e) {
-    // Fallback: run cleanup a few times if proxy fails, then stop
     let cleanupCount = 0;
     const cleanupTimer = setInterval(() => {
         cleanupWindow();
@@ -231,16 +246,16 @@ window.chrome = {
     },
     loadTimes: function() {
         return {
-            commitLoadTime: Date.now() / 1000 - Math.random() * 2,
+            commitLoadTime: Date.now() / 1000 - _eoka_rand() * 2,
             connectionInfo: "h2",
-            finishDocumentLoadTime: Date.now() / 1000 - Math.random(),
-            finishLoadTime: Date.now() / 1000 - Math.random() * 0.5,
+            finishDocumentLoadTime: Date.now() / 1000 - _eoka_rand(),
+            finishLoadTime: Date.now() / 1000 - _eoka_rand() * 0.5,
             firstPaintAfterLoadTime: 0,
-            firstPaintTime: Date.now() / 1000 - Math.random() * 1.5,
+            firstPaintTime: Date.now() / 1000 - _eoka_rand() * 1.5,
             navigationType: "Other",
             npnNegotiatedProtocol: "h2",
-            requestTime: Date.now() / 1000 - Math.random() * 3,
-            startLoadTime: Date.now() / 1000 - Math.random() * 2.5,
+            requestTime: Date.now() / 1000 - _eoka_rand() * 3,
+            startLoadTime: Date.now() / 1000 - _eoka_rand() * 2.5,
             wasAlternateProtocolAvailable: false,
             wasFetchedViaSpdy: true,
             wasNpnNegotiated: true
@@ -249,8 +264,8 @@ window.chrome = {
     csi: function() {
         return {
             onloadT: Date.now(),
-            pageT: Math.random() * 1000 + 500,
-            startE: Date.now() - Math.random() * 3000,
+            pageT: _eoka_rand() * 1000 + 500,
+            startE: Date.now() - _eoka_rand() * 3000,
             tran: 15
         };
     },
@@ -269,13 +284,13 @@ const originalPermissionsQuery = navigator.permissions.query.bind(navigator.perm
 
 try {
     Object.defineProperty(Notification, 'permission', {
-        get: () => 'default',
+        get: _eoka_mark(() => 'default', 'get permission'),
         configurable: true,
         enumerable: true
     });
 } catch(e) {}
 
-navigator.permissions.query = function(parameters) {
+navigator.permissions.query = _eoka_mark(function query(parameters) {
     const name = parameters.name;
 
     if (name === 'notifications') {
@@ -319,83 +334,83 @@ navigator.permissions.query = function(parameters) {
             dispatchEvent: function() { return true; }
         };
     });
-};
+}, 'query');
 "#;
 
-/// Plugins spoofing - defined on Navigator.prototype to avoid getOwnPropertyNames detection
+/// Plugins spoofing - defined on Navigator.prototype with a stable cached reference.
 pub const PLUGINS_EVASION: &str = r#"
-// Define plugins on prototype so Object.getOwnPropertyNames(navigator) returns empty
-Object.defineProperty(Navigator.prototype, 'plugins', {
-    get: () => {
-        const plugins = [
-            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
-        ];
+const _eoka_buildPlugins = () => {
+    const plugins = [
+        { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
+    ];
 
-        const pluginArray = Object.create(PluginArray.prototype);
-        plugins.forEach((p, i) => {
-            const plugin = Object.create(Plugin.prototype);
-            Object.defineProperties(plugin, {
-                name: { value: p.name },
-                filename: { value: p.filename },
-                description: { value: p.description },
-                length: { value: 1 }
-            });
-            pluginArray[i] = plugin;
+    const pluginArray = Object.create(PluginArray.prototype);
+    plugins.forEach((p, i) => {
+        const plugin = Object.create(Plugin.prototype);
+        Object.defineProperties(plugin, {
+            name: { value: p.name, enumerable: true },
+            filename: { value: p.filename, enumerable: true },
+            description: { value: p.description, enumerable: true },
+            length: { value: 1, enumerable: true }
         });
+        pluginArray[i] = plugin;
+        pluginArray[p.name] = plugin;
+    });
 
-        Object.defineProperty(pluginArray, 'length', { value: plugins.length });
-        pluginArray.item = (i) => pluginArray[i];
-        pluginArray.namedItem = (name) => plugins.find(p => p.name === name);
-        pluginArray.refresh = () => {};
+    Object.defineProperty(pluginArray, 'length', { value: plugins.length });
+    pluginArray.item = _eoka_mark((i) => pluginArray[i] || null, 'item');
+    pluginArray.namedItem = _eoka_mark((name) => pluginArray[name] || null, 'namedItem');
+    pluginArray.refresh = _eoka_mark(() => {}, 'refresh');
+    return pluginArray;
+};
 
-        return pluginArray;
-    },
-    configurable: true
+const _eoka_pluginArray = _eoka_buildPlugins();
+Object.defineProperty(Navigator.prototype, 'plugins', {
+    get: _eoka_mark(() => _eoka_pluginArray, 'get plugins'),
+    configurable: true,
+    enumerable: true
 });
 "#;
 
-/// Navigator properties (combined for efficiency)
+/// Navigator properties (languages, platform, hardware) filled from the fingerprint.
 pub const NAVIGATOR_PROPS_EVASION: &str = r#"
-// Language, platform, hardware - all on Navigator.prototype for consistency
 const navProps = {
-    languages: { get: () => ['en-US', 'en'] },
-    language: { get: () => 'en-US' },
-    platform: { get: () => 'MacIntel' },
+    languages: { get: () => Object.freeze(__EOKA_LANGUAGES__) },
+    language: { get: () => '__EOKA_LANGUAGE__' },
+    platform: { get: () => '__EOKA_PLATFORM__' },
     vendor: { get: () => 'Google Inc.' },
-    hardwareConcurrency: { get: () => 8 },
-    deviceMemory: { get: () => 8 },
+    hardwareConcurrency: { get: () => __EOKA_HW__ },
+    deviceMemory: { get: () => __EOKA_MEM__ },
     maxTouchPoints: { get: () => 0 }
 };
 for (const [prop, desc] of Object.entries(navProps)) {
-    Object.defineProperty(Navigator.prototype, prop, { ...desc, configurable: true });
+    _eoka_mark(desc.get, 'get ' + prop);
+    Object.defineProperty(Navigator.prototype, prop, {
+        ...desc,
+        configurable: true,
+        enumerable: true
+    });
 }
 "#;
 
 /// Headless detection bypass
 pub const HEADLESS_EVASION: &str = r#"
 // Fix screen properties
-Object.defineProperty(screen, 'availWidth', { get: () => screen.width });
-Object.defineProperty(screen, 'availHeight', { get: () => screen.height - 40 });
+Object.defineProperty(screen, 'availWidth', { get: _eoka_mark(() => screen.width, 'get availWidth'), configurable: true });
+Object.defineProperty(screen, 'availHeight', { get: _eoka_mark(() => screen.height - 40, 'get availHeight'), configurable: true });
 
 // Mock window dimensions
-Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
-Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight + 85 });
-
-// Fix broken Image detection
-const originalImage = window.Image;
-window.Image = function(...args) {
-    const img = new originalImage(...args);
-    Object.defineProperty(img, 'naturalHeight', { get: () => 20 });
-    return img;
-};
-window.Image.prototype = originalImage.prototype;
+Object.defineProperty(window, 'outerWidth', { get: _eoka_mark(() => window.innerWidth, 'get outerWidth'), configurable: true });
+Object.defineProperty(window, 'outerHeight', { get: _eoka_mark(() => window.innerHeight + 85, 'get outerHeight'), configurable: true });
 
 // Fix window.matchMedia
 const originalMatchMedia = window.matchMedia;
 if (originalMatchMedia) {
-    window.matchMedia = function(query) {
+    window.matchMedia = _eoka_mark(function matchMedia(query) {
         const result = originalMatchMedia.call(window, query);
         if (query.includes('prefers-reduced-motion')) {
             return {
@@ -410,72 +425,53 @@ if (originalMatchMedia) {
             };
         }
         return result;
-    };
+    }, 'matchMedia');
 }
 
 // Ensure window.origin is correct
 try {
     if (!window.origin || window.origin === 'null') {
         Object.defineProperty(window, 'origin', {
-            get: function() {
-                return window.location.origin;
-            },
+            get: _eoka_mark(function() { return window.location.origin; }, 'get origin'),
             configurable: true
         });
     }
 } catch(e) {}
 "#;
 
-/// Battery API fix - defined on prototype to avoid getOwnPropertyNames detection
+/// Battery API fix - Proxy over the real BatteryManager with spoofed values.
 pub const BATTERY_EVASION: &str = r#"
-// Define on Navigator.prototype to avoid Object.getOwnPropertyNames(navigator) detection
 const originalGetBattery = Navigator.prototype.getBattery;
 if (originalGetBattery) {
     Object.defineProperty(Navigator.prototype, 'getBattery', {
-        value: function() {
+        value: _eoka_mark(function getBattery() {
             return originalGetBattery.call(this).then(function(battery) {
-                return {
-                    charging: true,
-                    chargingTime: 0,
-                    dischargingTime: Infinity,
-                    level: 0.87 + (Math.random() * 0.1),
-                    onchargingchange: battery.onchargingchange,
-                    onchargingtimechange: battery.onchargingtimechange,
-                    ondischargingtimechange: battery.ondischargingtimechange,
-                    onlevelchange: battery.onlevelchange,
-                    addEventListener: battery.addEventListener?.bind(battery) || function() {},
-                    removeEventListener: battery.removeEventListener?.bind(battery) || function() {},
-                    dispatchEvent: battery.dispatchEvent?.bind(battery) || function() { return true; }
-                };
-            }).catch(function() {
-                return {
-                    charging: true,
-                    chargingTime: 0,
-                    dischargingTime: Infinity,
-                    level: 0.91,
-                    onchargingchange: null,
-                    onchargingtimechange: null,
-                    ondischargingtimechange: null,
-                    onlevelchange: null,
-                    addEventListener: function() {},
-                    removeEventListener: function() {},
-                    dispatchEvent: function() { return true; }
-                };
+                return new Proxy(battery, {
+                    get(target, prop) {
+                        switch (prop) {
+                            case 'charging': return true;
+                            case 'chargingTime': return 0;
+                            case 'dischargingTime': return Infinity;
+                            case 'level': return 1;
+                        }
+                        const v = target[prop];
+                        return typeof v === 'function' ? v.bind(target) : v;
+                    }
+                });
             });
-        },
+        }, 'getBattery'),
         configurable: true,
         writable: true
     });
 }
 "#;
 
-/// Navigator connection fix
+/// Navigator connection + userAgentData hygiene
 pub const NAVIGATOR_EXTRA_EVASION: &str = r#"
-// Fix navigator.userAgentData
 if (navigator.userAgentData) {
     const originalGetHighEntropyValues = navigator.userAgentData.getHighEntropyValues?.bind(navigator.userAgentData);
     if (originalGetHighEntropyValues) {
-        navigator.userAgentData.getHighEntropyValues = function(hints) {
+        navigator.userAgentData.getHighEntropyValues = _eoka_mark(function getHighEntropyValues(hints) {
             return originalGetHighEntropyValues(hints).then(function(data) {
                 if (data.brands) {
                     data.brands = data.brands.filter(b =>
@@ -484,7 +480,7 @@ if (navigator.userAgentData) {
                 }
                 return data;
             });
-        };
+        }, 'getHighEntropyValues');
     }
 }
 
@@ -501,7 +497,7 @@ if (navigator.connection) {
         for (const [key, value] of Object.entries(connectionProps)) {
             try {
                 Object.defineProperty(navigator.connection, key, {
-                    get: () => value,
+                    get: _eoka_mark(() => value, 'get ' + key),
                     configurable: true,
                     enumerable: true
                 });
@@ -511,75 +507,98 @@ if (navigator.connection) {
 }
 "#;
 
-/// Combined fingerprint evasion (WebGL + Canvas + Audio)
+/// Combined fingerprint evasion (WebGL + Canvas + Audio).
 pub const FINGERPRINT_EVASION: &str = r#"
-// WebGL vendor/renderer spoofing
-const spoofWebGL = (proto) => {
+const _eoka_spoofWebGL = (proto) => {
     const orig = proto.getParameter;
-    proto.getParameter = function(p) {
-        if (p === 37445) return 'Intel Inc.';
-        if (p === 37446) return 'Intel Iris Pro Graphics 6200';
+    proto.getParameter = _eoka_mark(function getParameter(p) {
+        if (p === 37445) return '__EOKA_WEBGL_VENDOR__';
+        if (p === 37446) return '__EOKA_WEBGL_RENDERER__';
         return orig.call(this, p);
-    };
+    }, 'getParameter');
 };
-spoofWebGL(WebGLRenderingContext.prototype);
-if (typeof WebGL2RenderingContext !== 'undefined') spoofWebGL(WebGL2RenderingContext.prototype);
+_eoka_spoofWebGL(WebGLRenderingContext.prototype);
+if (typeof WebGL2RenderingContext !== 'undefined') _eoka_spoofWebGL(WebGL2RenderingContext.prototype);
 
-// Canvas noise
-const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
-HTMLCanvasElement.prototype.toDataURL = function(type) {
-    if (!type || type === 'image/png') {
-        const ctx = this.getContext('2d');
-        if (ctx) {
-            const d = ctx.getImageData(0, 0, this.width, this.height);
-            for (let i = 0; i < d.data.length; i += 4) d.data[i] ^= (Math.random() * 2) | 0;
-            ctx.putImageData(d, 0, 0);
+// Canvas noise — deterministic, applied on a temp copy.
+const _eoka_noiseCanvas = (canvas) => {
+    const w = canvas.width | 0, h = canvas.height | 0;
+    if (w <= 0 || h <= 0) return canvas;
+    try {
+        const tmp = document.createElement('canvas');
+        tmp.width = w; tmp.height = h;
+        const tctx = tmp.getContext('2d');
+        tctx.drawImage(canvas, 0, 0);
+        const img = tctx.getImageData(0, 0, w, h);
+        const data = img.data;
+        let s = (__EOKA_NOISE_SEED__ >>> 0) || 1;
+        for (let i = 0; i < data.length; i += 4) {
+            s = _eoka_lcg(s);
+            data[i] = data[i] ^ (s & 1);
         }
+        tctx.putImageData(img, 0, 0);
+        return tmp;
+    } catch(e) {
+        return canvas;
     }
-    return origToDataURL.apply(this, arguments);
 };
 
-// Audio noise
+const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+HTMLCanvasElement.prototype.toDataURL = _eoka_mark(function toDataURL(...args) {
+    return origToDataURL.apply(_eoka_noiseCanvas(this), args);
+}, 'toDataURL');
+
+const origToBlob = HTMLCanvasElement.prototype.toBlob;
+if (origToBlob) {
+    HTMLCanvasElement.prototype.toBlob = _eoka_mark(function toBlob(...args) {
+        return origToBlob.apply(_eoka_noiseCanvas(this), args);
+    }, 'toBlob');
+}
+
+// Audio noise — deterministic, applied once per channel buffer.
 const origGetChannelData = AudioBuffer.prototype.getChannelData;
-AudioBuffer.prototype.getChannelData = function(ch) {
+const _eoka_audioSeen = new WeakSet();
+AudioBuffer.prototype.getChannelData = _eoka_mark(function getChannelData(ch) {
     const d = origGetChannelData.call(this, ch);
-    for (let i = 0; i < d.length; i += 100) d[i] += Math.random() * 0.0001 - 0.00005;
+    if (!_eoka_audioSeen.has(d)) {
+        let s = ((__EOKA_NOISE_SEED__ >>> 0) ^ (ch >>> 0)) >>> 0 || 1;
+        for (let i = 0; i < d.length; i += 100) {
+            s = _eoka_lcg(s);
+            d[i] += (s / 4294967296 - 0.5) * 0.0001;
+        }
+        _eoka_audioSeen.add(d);
+    }
     return d;
-};
+}, 'getChannelData');
 "#;
 
-/// WebRTC leak protection - prevent real IP from leaking
+/// WebRTC leak protection - prevent real IP from leaking via public STUN.
 pub const WEBRTC_EVASION: &str = r#"
-// Disable WebRTC IP leak by overriding RTCPeerConnection
 if (typeof RTCPeerConnection !== 'undefined') {
     const origRTCPeerConnection = RTCPeerConnection;
 
-    // Override to prevent IP leak via STUN
-    window.RTCPeerConnection = function(config, constraints) {
-        // Filter out Google STUN servers which are commonly used for IP detection
+    const _eoka_filterServers = (config) => {
         if (config && config.iceServers) {
             config.iceServers = config.iceServers.filter(server => {
                 const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
                 return !urls.some(url =>
-                    url.includes('stun.l.google.com') ||
-                    url.includes('stun1.l.google.com') ||
-                    url.includes('stun2.l.google.com')
+                    /^stuns?:/i.test(url) || /^turns?:/i.test(url)
                 );
             });
         }
-        return new origRTCPeerConnection(config, constraints);
+        return config;
     };
 
-    // Copy prototype
-    window.RTCPeerConnection.prototype = origRTCPeerConnection.prototype;
+    window.RTCPeerConnection = _eoka_mark(function RTCPeerConnection(config, constraints) {
+        return new origRTCPeerConnection(_eoka_filterServers(config), constraints);
+    }, 'RTCPeerConnection');
 
-    // Preserve static methods
+    window.RTCPeerConnection.prototype = origRTCPeerConnection.prototype;
     Object.keys(origRTCPeerConnection).forEach(key => {
         window.RTCPeerConnection[key] = origRTCPeerConnection[key];
     });
 }
 
-// Also handle webkitRTCPeerConnection
 if (typeof webkitRTCPeerConnection !== 'undefined') {
     window.webkitRTCPeerConnection = window.RTCPeerConnection;
 }
@@ -587,7 +606,6 @@ if (typeof webkitRTCPeerConnection !== 'undefined') {
 
 /// Speech synthesis - headless Chrome has 0 voices, real Chrome has many
 pub const SPEECH_EVASION: &str = r#"
-// Spoof speechSynthesis.getVoices() to return realistic voices
 if (typeof speechSynthesis !== 'undefined') {
     const defaultVoices = [
         { name: 'Alex', lang: 'en-US', localService: true, default: true, voiceURI: 'Alex' },
@@ -608,58 +626,57 @@ if (typeof speechSynthesis !== 'undefined') {
     });
 
     const origGetVoices = speechSynthesis.getVoices.bind(speechSynthesis);
-    speechSynthesis.getVoices = function() {
+    speechSynthesis.getVoices = _eoka_mark(function getVoices() {
         const voices = origGetVoices();
         return voices.length > 0 ? voices : defaultVoices;
-    };
+    }, 'getVoices');
 }
 "#;
 
 /// Media devices - headless returns empty array
 pub const MEDIA_DEVICES_EVASION: &str = r#"
-// Spoof navigator.mediaDevices.enumerateDevices()
 if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
     const origEnumerateDevices = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
 
-    navigator.mediaDevices.enumerateDevices = async function() {
+    navigator.mediaDevices.enumerateDevices = _eoka_mark(async function enumerateDevices() {
         const devices = await origEnumerateDevices();
         if (devices.length === 0) {
-            // Return fake devices if none exist (headless mode)
-            return [
-                { deviceId: 'default', groupId: 'default', kind: 'audioinput', label: '' },
-                { deviceId: 'default', groupId: 'default', kind: 'audiooutput', label: '' },
-                { deviceId: 'default', groupId: 'default', kind: 'videoinput', label: '' }
-            ].map(d => {
+            const fake = [
+                { deviceId: 'default', groupId: '5f8b2c1e9a3d', kind: 'audioinput', label: '' },
+                { deviceId: 'default', groupId: '5f8b2c1e9a3d', kind: 'audiooutput', label: '' },
+                { deviceId: 'e2d4a6c8b0f1', groupId: '9c3e7a1d4b6f', kind: 'videoinput', label: '' }
+            ];
+            return fake.map(d => {
                 const device = Object.create(MediaDeviceInfo.prototype);
                 Object.defineProperties(device, {
                     deviceId: { value: d.deviceId, enumerable: true },
                     groupId: { value: d.groupId, enumerable: true },
                     kind: { value: d.kind, enumerable: true },
                     label: { value: d.label, enumerable: true },
-                    toJSON: { value: () => d }
+                    toJSON: { value: _eoka_mark(() => d, 'toJSON') }
                 });
                 return device;
             });
         }
         return devices;
-    };
+    }, 'enumerateDevices');
 }
 "#;
 
 /// Bluetooth API - headless throws error, real Chrome returns object
 pub const BLUETOOTH_EVASION: &str = r#"
-// Fix navigator.bluetooth which errors in headless
 if (!navigator.bluetooth) {
     Object.defineProperty(Navigator.prototype, 'bluetooth', {
-        get: () => ({
+        get: _eoka_mark(() => ({
             getAvailability: () => Promise.resolve(false),
             requestDevice: () => Promise.reject(new DOMException('User cancelled', 'NotFoundError')),
             getDevices: () => Promise.resolve([]),
             addEventListener: () => {},
             removeEventListener: () => {},
             dispatchEvent: () => true
-        }),
-        configurable: true
+        }), 'get bluetooth'),
+        configurable: true,
+        enumerable: true
     });
 }
 "#;
@@ -672,11 +689,11 @@ pub const TIMEZONE_EVASION: &str = r#"
 const targetTimezone = '__EOKA_TIMEZONE__';
 const origDateTimeFormat = Intl.DateTimeFormat;
 
-Intl.DateTimeFormat = function(locales, options) {
+Intl.DateTimeFormat = _eoka_mark(function DateTimeFormat(locales, options) {
     if (!options) options = {};
     if (!options.timeZone) options.timeZone = targetTimezone;
     return new origDateTimeFormat(locales, options);
-};
+}, 'DateTimeFormat');
 Intl.DateTimeFormat.prototype = origDateTimeFormat.prototype;
 Intl.DateTimeFormat.supportedLocalesOf = origDateTimeFormat.supportedLocalesOf;
 
@@ -702,14 +719,13 @@ Intl.DateTimeFormat.supportedLocalesOf = origDateTimeFormat.supportedLocalesOf;
     // offset, DST is northern-hemisphere (Mar-Nov); otherwise southern.
     const dstIsJul = julOffset < janOffset;
 
-    Date.prototype.getTimezoneOffset = function() {
+    Date.prototype.getTimezoneOffset = _eoka_mark(function getTimezoneOffset() {
         if (!hasDST) return stdOffset;
         // Quick month-based check — accurate for the vast majority of dates.
-        // (Exact DST transition dates vary by zone, but this avoids toLocaleString.)
         const m = this.getUTCMonth();
         const isDST = dstIsJul ? (m >= 2 && m <= 10) : (m <= 2 || m >= 10);
         return isDST ? dstOffset : stdOffset;
-    };
+    }, 'getTimezoneOffset');
 }
 "#;
 
@@ -732,25 +748,24 @@ pub(crate) const COMMON_TIMEZONES: &[&str] = &[
     "Australia/Sydney",
 ];
 
-/// Build the complete evasion script based on config
-pub fn build_evasion_script(config: &StealthConfig) -> String {
-    // Resolve timezone: use config value, or pick a random common one
+/// Build the complete evasion script for the given config and fingerprint.
+pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> String {
     let timezone = config
         .timezone
         .clone()
-        .unwrap_or_else(|| COMMON_TIMEZONES[fastrand::usize(..COMMON_TIMEZONES.len())].to_string());
+        .unwrap_or_else(|| fp.timezone.clone());
 
     let mut scripts = vec![
+        NATIVE_TOSTRING_EVASION, // must be first: defines _eoka_mark / _eoka_rand
         WEBDRIVER_EVASION,
         CDP_EVASION,
         CHROME_RUNTIME_EVASION,
         PERMISSIONS_EVASION,
         PLUGINS_EVASION,
-        NAVIGATOR_PROPS_EVASION, // Combined: languages, platform, hardware, etc.
+        NAVIGATOR_PROPS_EVASION,
         HEADLESS_EVASION,
         BATTERY_EVASION,
         NAVIGATOR_EXTRA_EVASION,
-        // New evasions for better coverage
         WEBRTC_EVASION,
         SPEECH_EVASION,
         MEDIA_DEVICES_EVASION,
@@ -758,14 +773,41 @@ pub fn build_evasion_script(config: &StealthConfig) -> String {
         TIMEZONE_EVASION,
     ];
 
-    // Add fingerprint evasion if any spoofing enabled
     if config.webgl_spoof || config.canvas_spoof || config.audio_spoof {
         scripts.push(FINGERPRINT_EVASION);
     }
 
-    // Wrap in IIFE and replace timezone placeholder
+    let languages_json = format!(
+        "[{}]",
+        fp.languages
+            .iter()
+            .map(|l| format!("'{}'", escape_js_string(l)))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let language = fp.languages.first().cloned().unwrap_or_default();
+    let noise_seed = fastrand::u32(1..=u32::MAX);
+
     let script = format!("(function(){{{}}})();", scripts.join("\n"));
-    script.replace("__EOKA_TIMEZONE__", &timezone)
+    script
+        .replace("__EOKA_TIMEZONE__", &escape_js_string(&timezone))
+        .replace("__EOKA_PLATFORM__", &escape_js_string(fp.nav_platform()))
+        .replace("__EOKA_LANGUAGES__", &languages_json)
+        .replace("__EOKA_LANGUAGE__", &escape_js_string(&language))
+        .replace("__EOKA_HW__", &fp.hardware_concurrency.to_string())
+        .replace("__EOKA_MEM__", &fp.device_memory.to_string())
+        .replace("__EOKA_WEBGL_VENDOR__", &escape_js_string(&fp.webgl_vendor))
+        .replace(
+            "__EOKA_WEBGL_RENDERER__",
+            &escape_js_string(&fp.webgl_renderer),
+        )
+        .replace("__EOKA_NOISE_SEED__", &noise_seed.to_string())
+}
+
+/// Build the complete evasion script based on config.
+pub fn build_evasion_script(config: &StealthConfig) -> String {
+    let fp = Fingerprint::resolve(config.user_agent.as_deref(), config.timezone.as_deref());
+    build_evasion_script_for(config, &fp)
 }
 
 /// Get the full evasion script (all options enabled)
@@ -788,10 +830,93 @@ mod tests {
     }
 
     #[test]
+    fn test_placeholders_are_filled() {
+        let script = build_evasion_script(&StealthConfig::default());
+        assert!(
+            !script.contains("__EOKA_"),
+            "unresolved placeholder in script"
+        );
+        assert!(script.contains("_eoka_mark"));
+    }
+
+    #[test]
     fn test_script_is_wrapped_in_iife() {
         let config = StealthConfig::default();
         let script = build_evasion_script(&config);
         assert!(script.starts_with("(function()"));
         assert!(script.ends_with("})();"));
+    }
+
+    // Regression: the script must be driven by the fingerprint, not by old
+    // hardcoded values. Build for a known Windows fingerprint and assert the
+    // Windows-specific fields flow through while the old Mac constants and
+    // removed features do not.
+    #[test]
+    fn test_build_script_for_known_windows_fp() {
+        let fp = Fingerprint::resolve(
+            Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36"),
+            None,
+        );
+        let config = StealthConfig::default();
+        let script = build_evasion_script_for(&config, &fp);
+
+        // navigator.platform comes from the fingerprint (Win32), and the old
+        // hardcoded MacIntel must be gone.
+        assert!(
+            script.contains("'Win32'"),
+            "script must contain the fingerprint nav_platform 'Win32'"
+        );
+        assert!(
+            !script.contains("'MacIntel'"),
+            "script must not contain the old hardcoded 'MacIntel'"
+        );
+
+        // WebGL renderer and hardware values flow from the fingerprint.
+        assert!(
+            script.contains(&fp.webgl_renderer),
+            "script must contain the fingerprint webgl_renderer: {}",
+            fp.webgl_renderer
+        );
+        assert!(
+            script.contains(&fp.hardware_concurrency.to_string()),
+            "script must contain hardware_concurrency"
+        );
+        assert!(
+            script.contains(&fp.device_memory.to_string()),
+            "script must contain device_memory"
+        );
+
+        // toString-masking machinery is present.
+        assert!(script.contains("_eoka_mark"));
+        assert!(script.contains("[native code]"));
+
+        // No leftover placeholders, and the removed beacon must be gone.
+        assert!(
+            !script.contains("__EOKA_"),
+            "script must not contain unresolved placeholders"
+        );
+        assert!(
+            !script.contains("__eoka_pending_requests"),
+            "removed request-beacon must not reappear"
+        );
+    }
+
+    // Escaping regression: config values with a single quote must be routed
+    // through escape_js_string, producing an escaped `\'` in the output.
+    #[test]
+    fn test_config_values_are_js_escaped() {
+        let config = StealthConfig {
+            timezone: Some("Foo'Bar".into()),
+            ..StealthConfig::default()
+        };
+        let script = build_evasion_script(&config);
+        assert!(
+            script.contains(r"Foo\'Bar"),
+            "timezone single quote must be escaped via escape_js_string"
+        );
+        assert!(
+            !script.contains("'Foo'Bar'"),
+            "unescaped single quote must not appear"
+        );
     }
 }

@@ -95,6 +95,62 @@ fn get_pattern_matcher() -> Result<&'static AhoCorasick> {
     Ok(PATTERN_MATCHER.get_or_init(|| ac))
 }
 
+/// Matcher for patterns that patching actually rewrites (excludes `Skip`).
+static VERIFY_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
+
+fn get_verify_matcher() -> Result<&'static AhoCorasick> {
+    if let Some(ac) = VERIFY_MATCHER.get() {
+        return Ok(ac);
+    }
+    let patterns: Vec<&[u8]> = PATCH_PATTERNS
+        .iter()
+        .filter(|p| p.strategy != PatchStrategy::Skip)
+        .map(|p| p.pattern)
+        .collect();
+    let ac = AhoCorasick::new(&patterns).map_err(|e| {
+        Error::patching(
+            "init",
+            format!("Failed to build verification automaton: {}", e),
+        )
+    })?;
+    Ok(VERIFY_MATCHER.get_or_init(|| ac))
+}
+
+/// Stable temp-subdir name for the patched copy, keyed on the original binary's
+/// identity (path + size + mtime) so the cache hits across runs.
+fn stable_cache_name(original_path: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+    let abs = fs::canonicalize(original_path).unwrap_or_else(|_| original_path.to_path_buf());
+    abs.hash(&mut hasher);
+
+    if let Ok(meta) = fs::metadata(original_path) {
+        meta.len().hash(&mut hasher);
+        if let Ok(modified) = meta.modified() {
+            if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
+                dur.as_nanos().hash(&mut hasher);
+            }
+        }
+    }
+
+    format!("eoka-chrome-{:016x}", hasher.finish())
+}
+
+/// Create a directory (and parents) with restrictive permissions (0o700 on unix).
+fn create_dir_secure(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(dir)?.permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(dir, perms)?;
+    }
+    Ok(())
+}
+
 /// Find Chrome binary on the system
 pub fn find_chrome() -> Result<PathBuf> {
     let candidates = if cfg!(target_os = "macos") {
@@ -107,6 +163,8 @@ pub fn find_chrome() -> Result<PathBuf> {
         vec![
             "/usr/bin/google-chrome",
             "/usr/bin/google-chrome-stable",
+            "/usr/bin/google-chrome-beta",
+            "/usr/bin/google-chrome-unstable",
             "/usr/bin/chromium",
             "/usr/bin/chromium-browser",
             "/snap/bin/chromium",
@@ -148,10 +206,20 @@ fn resolve_to_elf(path: &Path) -> PathBuf {
     }
 
     // Follow symlinks first — google-chrome might be a symlink to the real thing
-    if let Ok(resolved) = fs::canonicalize(path) {
-        if is_elf(&resolved) {
-            tracing::info!("Resolved symlink {:?} to ELF binary {:?}", path, resolved);
-            return resolved;
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if is_elf(&resolved) {
+        tracing::info!("Resolved symlink {:?} to ELF binary {:?}", path, resolved);
+        return resolved;
+    }
+
+    // Google Chrome ships `google-chrome[-beta|-unstable]` as a shell wrapper
+    // that execs `$HERE/chrome` — the real ELF sits next to the wrapper. This
+    // covers every channel (stable in /opt/google/chrome, beta in
+    // /opt/google/chrome-beta, …) without hardcoding channel paths.
+    if let Some(sibling) = resolved.parent().map(|d| d.join("chrome")) {
+        if is_elf(&sibling) {
+            tracing::info!("Resolved wrapper {:?} to sibling ELF {:?}", path, sibling);
+            return sibling;
         }
     }
 
@@ -238,7 +306,7 @@ impl ChromePatcher {
                     .ok_or_else(|| Error::patching("new", "Invalid bundle path"))?;
 
                 let patched_bundle = std::env::temp_dir()
-                    .join(format!("eoka-chrome-{}", std::process::id()))
+                    .join(stable_cache_name(chrome_path))
                     .join(bundle_name);
 
                 let relative_path = chrome_path
@@ -261,7 +329,7 @@ impl ChromePatcher {
             .ok_or_else(|| Error::patching("new", "Invalid path"))?;
 
         let patched_path = std::env::temp_dir()
-            .join(format!("eoka-chrome-{}", std::process::id()))
+            .join(stable_cache_name(chrome_path))
             .join(filename);
 
         Ok(Self {
@@ -309,7 +377,7 @@ impl ChromePatcher {
         };
         buffer.truncate(bytes_read);
 
-        match get_pattern_matcher() {
+        match get_verify_matcher() {
             Ok(ac) => !ac.is_match(&buffer),
             Err(_) => false,
         }
@@ -328,7 +396,7 @@ impl ChromePatcher {
         }
 
         if let Some(parent) = dest_bundle.parent() {
-            fs::create_dir_all(parent)?;
+            create_dir_secure(parent)?;
         }
 
         tracing::info!(
@@ -458,7 +526,7 @@ impl ChromePatcher {
         #[cfg(not(target_os = "macos"))]
         {
             if let Some(parent) = self.patched_path.parent() {
-                fs::create_dir_all(parent)?;
+                create_dir_secure(parent)?;
             }
             // Symlink companion files (.so, .pak, .dat, .bin, locales, etc.)
             // so the patched binary can find its resources. Chromium uses
@@ -519,17 +587,25 @@ impl ChromePatcher {
         #[cfg(not(target_os = "macos"))]
         let should_patch_in_place = false;
 
-        if !should_patch_in_place {
-            fs::copy(read_path, &self.patched_path)?;
-        }
+        let file = if should_patch_in_place {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.patched_path)?
+        } else {
+            let _ = fs::remove_file(&self.patched_path);
+            let mut dst = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&self.patched_path)?;
+            let mut src = File::open(read_path)?;
+            std::io::copy(&mut src, &mut dst)?;
+            dst
+        };
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&self.patched_path)?;
-
-        // SAFETY: We just created/copied this file and hold it open exclusively.
-        // No other process is writing to it concurrently.
+        // SAFETY: `file` is a regular file we created exclusively and hold open
+        // read-write; no other process maps or writes it concurrently.
         let mut mmap = unsafe { MmapMut::map_mut(&file)? };
         let patch_count = self.apply_patches(&mut mmap)?;
 
@@ -558,10 +634,14 @@ impl ChromePatcher {
 
         #[cfg(not(target_os = "macos"))]
         if let Some(parent) = self.patched_path.parent() {
-            fs::create_dir_all(parent)?;
+            create_dir_secure(parent)?;
         }
 
-        let mut out_file = File::create(&self.patched_path)?;
+        let _ = fs::remove_file(&self.patched_path);
+        let mut out_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.patched_path)?;
         out_file.write_all(&data)?;
 
         Ok(patch_count)
@@ -593,11 +673,14 @@ impl ChromePatcher {
                     patched_ranges.push((start, end));
                 }
                 PatchStrategy::Scramble => {
-                    for i in (0..pattern.pattern.len() - 1).step_by(2) {
-                        data.swap(start + i, start + i + 1);
+                    // Guard against underflow on `len - 1`.
+                    if pattern.pattern.len() >= 2 {
+                        for i in (0..pattern.pattern.len() - 1).step_by(2) {
+                            data.swap(start + i, start + i + 1);
+                        }
+                        patch_count += 1;
+                        patched_ranges.push((start, end));
                     }
-                    patch_count += 1;
-                    patched_ranges.push((start, end));
                 }
                 PatchStrategy::Nullify => {
                     for byte in &mut data[start..end] {
@@ -718,5 +801,58 @@ mod tests {
         let ac = get_pattern_matcher().expect("pattern matcher should build");
         let matches: Vec<_> = ac.find_iter(test_data).collect();
         assert!(matches.len() >= 3);
+    }
+
+    #[test]
+    fn test_verify_matcher_matches_rewritten_patterns() {
+        let ac = get_verify_matcher().expect("verify matcher should build");
+        // Patterns that patching actually rewrites must be flagged by the
+        // verification matcher (an unpatched sample should fail verification).
+        assert!(ac.is_match(b"webdriver"), "should match webdriver");
+        assert!(ac.is_match(b"$cdc_"), "should match $cdc_");
+    }
+
+    #[test]
+    fn test_verify_matcher_excludes_skip_patterns() {
+        let ac = get_verify_matcher().expect("verify matcher should build");
+        // Skip-strategy patterns are detection-only and never rewritten, so
+        // they must NOT be part of verification — otherwise every real Chrome
+        // binary would look "unpatched" forever.
+        assert!(
+            !ac.is_match(b"Runtime.enable"),
+            "Skip pattern Runtime.enable must be excluded from verification"
+        );
+        assert!(
+            !ac.is_match(b"Page.addScriptToEvaluateOnNewDocument"),
+            "Skip pattern must be excluded from verification"
+        );
+    }
+
+    #[test]
+    fn test_apply_patches_preserves_length() {
+        // Build a patcher against a real (throwaway) file so ChromePatcher::new
+        // succeeds, then patch an in-memory buffer directly.
+        let dir = std::env::temp_dir().join(format!("eoka-patcher-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-chrome");
+        fs::write(&fake, b"placeholder").unwrap();
+
+        let patcher = ChromePatcher::new(&fake).expect("patcher should construct");
+
+        let mut buf = b"prefix webdriver suffix".to_vec();
+        let original_len = buf.len();
+        let count = patcher.apply_patches(&mut buf).expect("apply_patches");
+
+        // Scramble strategy swaps bytes in place: length is unchanged.
+        assert_eq!(buf.len(), original_len);
+        assert!(count >= 1, "webdriver should have been patched");
+        // The literal "webdriver" must no longer be present verbatim.
+        assert!(
+            !buf.windows(b"webdriver".len()).any(|w| w == b"webdriver"),
+            "webdriver should have been scrambled"
+        );
+
+        let _ = fs::remove_file(&fake);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

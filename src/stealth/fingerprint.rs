@@ -1,34 +1,24 @@
 //! Browser fingerprint generation
 //!
-//! Generates realistic, randomized browser fingerprints.
+//! Generates realistic, randomized, internally consistent browser fingerprints.
 
-/// Chrome versions (recent, realistic)
-const CHROME_VERSIONS: &[&str] = &[
-    "120.0.0.0",
-    "121.0.0.0",
-    "122.0.0.0",
-    "123.0.0.0",
-    "124.0.0.0",
-    "125.0.0.0",
-    "126.0.0.0",
-    "127.0.0.0",
-    "128.0.0.0",
-    "129.0.0.0",
-    "130.0.0.0",
-    "131.0.0.0",
-    "132.0.0.0",
-    "133.0.0.0",
-    "134.0.0.0",
+/// Recent Chrome versions as (major, full) pairs.
+const CHROME_VERSIONS: &[(&str, &str)] = &[
+    ("133", "133.0.6943.142"),
+    ("134", "134.0.6998.118"),
+    ("135", "135.0.7049.96"),
+    ("136", "136.0.7103.114"),
+    ("137", "137.0.7151.119"),
+    ("138", "138.0.7204.101"),
+    ("139", "139.0.7258.139"),
+    ("140", "140.0.7312.86"),
 ];
 
-/// macOS versions
-const MACOS_VERSIONS: &[&str] = &[
-    "10_15_7", "11_0_0", "11_6_0", "12_0_0", "12_6_0", "13_0_0", "13_4_0", "14_0_0", "14_2_0",
-    "14_4_0",
-];
+/// macOS client-hint platform versions (UA string is frozen at 10_15_7).
+const MACOS_CH_VERSIONS: &[&str] = &["13.6.0", "14.4.1", "14.5.0", "14.6.1", "15.0.0", "15.1.0"];
 
-/// Windows versions
-const WINDOWS_VERSIONS: &[&str] = &["10.0"];
+/// Windows client-hint platform versions.
+const WINDOWS_CH_VERSIONS: &[&str] = &["10.0.0", "15.0.0"];
 
 /// WebGL renderers for Mac
 const WEBGL_RENDERERS_MAC: &[&str] = &[
@@ -42,55 +32,90 @@ const WEBGL_RENDERERS_MAC: &[&str] = &[
 
 /// WebGL renderers for Windows
 const WEBGL_RENDERERS_WINDOWS: &[&str] = &[
-    "ANGLE (NVIDIA, NVIDIA GeForce RTX 3080, Direct3D11)",
-    "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070, Direct3D11)",
-    "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080, Direct3D11)",
-    "ANGLE (AMD, AMD Radeon RX 6800 XT, Direct3D11)",
-    "ANGLE (Intel, Intel UHD Graphics 770, Direct3D11)",
+    "ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "ANGLE (AMD, AMD Radeon RX 6800 XT Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0, D3D11)",
 ];
 
-/// Screen resolutions
-const SCREEN_RESOLUTIONS: &[(u32, u32)] = &[
-    (1920, 1080),
-    (2560, 1440),
-    (3840, 2160),
+/// Platform-specific screen resolutions.
+const SCREEN_RESOLUTIONS_MAC: &[(u32, u32)] = &[
     (1440, 900),
     (1680, 1050),
     (2560, 1600),
+    (1920, 1080),
     (3024, 1964), // MacBook Pro 14"
     (3456, 2234), // MacBook Pro 16"
 ];
+const SCREEN_RESOLUTIONS_WINDOWS: &[(u32, u32)] = &[
+    (1920, 1080),
+    (2560, 1440),
+    (3840, 2160),
+    (1366, 768),
+    (1536, 864),
+    (1600, 900),
+];
 
-/// Generate a random realistic user agent
 /// Pick a random element from a slice
 fn choose<T>(slice: &[T]) -> &T {
     &slice[fastrand::usize(..slice.len())]
 }
 
-pub fn random_user_agent() -> String {
-    let chrome_version = choose(CHROME_VERSIONS);
-
-    // 30% Mac, 70% Windows (matches real internet traffic)
-    if fastrand::f64() < 0.3 {
-        let macos = choose(MACOS_VERSIONS);
-        format!(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X {}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{} Safari/537.36",
-            macos, chrome_version
-        )
-    } else {
-        let windows = choose(WINDOWS_VERSIONS);
-        format!(
-            "Mozilla/5.0 (Windows NT {}; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{} Safari/537.36",
-            windows, chrome_version
-        )
+/// WebGL vendor, WebGL renderer and client-hint platform version for a platform.
+fn platform_surfaces(platform: Platform) -> (&'static str, String, String) {
+    match platform {
+        Platform::MacOS => (
+            "Google Inc. (Apple)",
+            choose(WEBGL_RENDERERS_MAC).to_string(),
+            choose(MACOS_CH_VERSIONS).to_string(),
+        ),
+        Platform::Windows => (
+            "Google Inc. (NVIDIA)",
+            choose(WEBGL_RENDERERS_WINDOWS).to_string(),
+            choose(WINDOWS_CH_VERSIONS).to_string(),
+        ),
     }
 }
 
-/// Browser fingerprint data
+/// A plausible screen resolution for the platform.
+fn platform_screen(platform: Platform) -> (u32, u32) {
+    match platform {
+        Platform::MacOS => *choose(SCREEN_RESOLUTIONS_MAC),
+        Platform::Windows => *choose(SCREEN_RESOLUTIONS_WINDOWS),
+    }
+}
+
+/// The UA string for a platform + Chrome full version.
+fn ua_for(platform: Platform, chrome_full_version: &str) -> String {
+    match platform {
+        Platform::MacOS => format!(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{} Safari/537.36",
+            chrome_full_version
+        ),
+        Platform::Windows => format!(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{} Safari/537.36",
+            chrome_full_version
+        ),
+    }
+}
+
+/// Generate a random realistic user agent.
+pub fn random_user_agent() -> String {
+    Fingerprint::random().user_agent
+}
+
+/// Browser fingerprint data — a single coherent identity.
 #[derive(Debug, Clone)]
 pub struct Fingerprint {
     pub user_agent: String,
     pub platform: Platform,
+    /// Chrome major version, e.g. "140" (drives `Sec-CH-UA` brand versions).
+    pub chrome_major: String,
+    /// Chrome full version, e.g. "140.0.7312.86".
+    pub chrome_full_version: String,
+    /// Client-hint OS version, e.g. "15.0.0".
+    pub platform_version: String,
     pub screen_width: u32,
     pub screen_height: u32,
     pub color_depth: u8,
@@ -102,47 +127,114 @@ pub struct Fingerprint {
     pub webgl_renderer: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     MacOS,
     Windows,
 }
 
 impl Fingerprint {
-    /// Generate a random consistent fingerprint
+    /// Build a fully coherent identity for a platform + Chrome version.
+    fn build(platform: Platform, chrome_major: String, chrome_full_version: String) -> Self {
+        let (webgl_vendor, webgl_renderer, platform_version) = platform_surfaces(platform);
+        let (screen_width, screen_height) = platform_screen(platform);
+        Self {
+            user_agent: ua_for(platform, &chrome_full_version),
+            platform,
+            chrome_major,
+            chrome_full_version,
+            platform_version,
+            screen_width,
+            screen_height,
+            color_depth: 24,
+            hardware_concurrency: *choose(&[4, 8, 10, 12, 16]),
+            device_memory: *choose(&[8, 8, 16, 32]),
+            timezone: choose(super::evasions::COMMON_TIMEZONES).to_string(),
+            languages: vec!["en-US".to_string(), "en".to_string()],
+            webgl_vendor: webgl_vendor.to_string(),
+            webgl_renderer,
+        }
+    }
+
+    /// Generate a random, internally consistent fingerprint.
     pub fn random() -> Self {
+        // 30% Mac, 70% Windows (roughly matches desktop traffic).
         let platform = if fastrand::f64() < 0.3 {
             Platform::MacOS
         } else {
             Platform::Windows
         };
+        let (major, full) = *choose(CHROME_VERSIONS);
+        Self::build(platform, major.to_string(), full.to_string())
+    }
 
-        let (screen_width, screen_height) = *choose(SCREEN_RESOLUTIONS);
-
-        let (webgl_vendor, webgl_renderer) = match platform {
-            Platform::MacOS => ("Google Inc. (Apple)", *choose(WEBGL_RENDERERS_MAC)),
-            Platform::Windows => (
-                "Google Inc. (NVIDIA Corporation)",
-                *choose(WEBGL_RENDERERS_WINDOWS),
-            ),
+    /// Resolve a fingerprint, honoring an explicit UA override or a random identity.
+    pub fn resolve(user_agent: Option<&str>, timezone: Option<&str>) -> Self {
+        let mut fp = match user_agent {
+            Some(ua) => {
+                let platform = if ua.contains("Macintosh") || ua.contains("Mac OS X") {
+                    Platform::MacOS
+                } else {
+                    Platform::Windows
+                };
+                let (major, full) = ua
+                    .split("Chrome/")
+                    .nth(1)
+                    .and_then(|rest| rest.split(' ').next())
+                    .filter(|v| !v.is_empty())
+                    .map(|v| (v.split('.').next().unwrap_or(v).to_string(), v.to_string()))
+                    .unwrap_or_else(|| {
+                        let (m, f) = *choose(CHROME_VERSIONS);
+                        (m.to_string(), f.to_string())
+                    });
+                let mut fp = Self::build(platform, major, full);
+                fp.user_agent = ua.to_string();
+                fp
+            }
+            None => Self::random(),
         };
-
-        let hardware_concurrency = *choose(&[4, 8, 10, 12, 16]);
-        let device_memory = *choose(&[8, 16, 32]);
-
-        Self {
-            user_agent: random_user_agent(),
-            platform,
-            screen_width,
-            screen_height,
-            color_depth: 24,
-            hardware_concurrency,
-            device_memory,
-            timezone: choose(super::evasions::COMMON_TIMEZONES).to_string(),
-            languages: vec!["en-US".to_string(), "en".to_string()],
-            webgl_vendor: webgl_vendor.to_string(),
-            webgl_renderer: webgl_renderer.to_string(),
+        if let Some(tz) = timezone {
+            fp.timezone = tz.to_string();
         }
+        fp
+    }
+
+    /// `navigator.platform` value consistent with this fingerprint.
+    pub fn nav_platform(&self) -> &'static str {
+        match self.platform {
+            Platform::MacOS => "MacIntel",
+            Platform::Windows => "Win32",
+        }
+    }
+
+    /// `Sec-CH-UA-Platform` value ("macOS" / "Windows").
+    pub fn ch_platform(&self) -> &'static str {
+        match self.platform {
+            Platform::MacOS => "macOS",
+            Platform::Windows => "Windows",
+        }
+    }
+
+    /// Client-hint brand list `(brand, version)` using the major version.
+    pub fn ch_brands(&self) -> Vec<(String, String)> {
+        vec![
+            ("Chromium".to_string(), self.chrome_major.clone()),
+            ("Google Chrome".to_string(), self.chrome_major.clone()),
+            ("Not?A_Brand".to_string(), "24".to_string()),
+        ]
+    }
+
+    /// Full-version brand list `(brand, full_version)` for
+    /// `Sec-CH-UA-Full-Version-List`.
+    pub fn ch_full_version_brands(&self) -> Vec<(String, String)> {
+        vec![
+            ("Chromium".to_string(), self.chrome_full_version.clone()),
+            (
+                "Google Chrome".to_string(),
+                self.chrome_full_version.clone(),
+            ),
+            ("Not?A_Brand".to_string(), "24.0.0.0".to_string()),
+        ]
     }
 }
 
@@ -161,12 +253,231 @@ mod tests {
     }
 
     #[test]
-    fn test_fingerprint_random() {
-        let fp = Fingerprint::random();
-        assert!(!fp.user_agent.is_empty());
-        assert!(fp.screen_width > 0);
-        assert!(fp.screen_height > 0);
-        assert!([4, 8, 10, 12, 16].contains(&fp.hardware_concurrency));
-        assert!([8, 16, 32].contains(&fp.device_memory));
+    fn test_fingerprint_random_is_consistent() {
+        for _ in 0..50 {
+            let fp = Fingerprint::random();
+            assert!(!fp.user_agent.is_empty());
+            assert!(fp.screen_width > 0 && fp.screen_height > 0);
+            assert!([4, 8, 10, 12, 16].contains(&fp.hardware_concurrency));
+            assert!([8, 16, 32].contains(&fp.device_memory));
+            match fp.platform {
+                Platform::MacOS => {
+                    assert!(fp.user_agent.contains("Macintosh"));
+                    assert_eq!(fp.nav_platform(), "MacIntel");
+                    assert_eq!(fp.ch_platform(), "macOS");
+                    // Chrome freezes the macOS UA token at 10_15_7.
+                    assert!(fp.user_agent.contains("Mac OS X 10_15_7"));
+                }
+                Platform::Windows => {
+                    assert!(fp.user_agent.contains("Windows NT 10.0"));
+                    assert_eq!(fp.nav_platform(), "Win32");
+                    assert_eq!(fp.ch_platform(), "Windows");
+                }
+            }
+            assert!(fp.user_agent.contains(&fp.chrome_full_version));
+            assert!(fp.chrome_full_version.starts_with(&fp.chrome_major));
+        }
+    }
+
+    #[test]
+    fn test_resolve_respects_pinned_ua() {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36";
+        let fp = Fingerprint::resolve(Some(ua), None);
+        assert_eq!(fp.user_agent, ua);
+        assert_eq!(fp.platform, Platform::Windows);
+        assert_eq!(fp.chrome_major, "140");
+        assert_eq!(fp.nav_platform(), "Win32");
+    }
+
+    // Over many samples, every random fingerprint must be internally coherent:
+    // the platform, UA string, nav_platform, ch_platform, and Chrome version
+    // fields all agree with one another.
+    #[test]
+    fn test_random_is_internally_coherent_over_samples() {
+        for _ in 0..200 {
+            let fp = Fingerprint::random();
+            match fp.platform {
+                Platform::MacOS => {
+                    assert!(
+                        fp.user_agent.contains("Macintosh"),
+                        "mac UA missing Macintosh: {}",
+                        fp.user_agent
+                    );
+                    assert!(
+                        fp.user_agent.contains("Mac OS X 10_15_7"),
+                        "mac UA missing frozen OS token: {}",
+                        fp.user_agent
+                    );
+                    assert_eq!(fp.nav_platform(), "MacIntel");
+                    assert_eq!(fp.ch_platform(), "macOS");
+                }
+                Platform::Windows => {
+                    assert!(
+                        fp.user_agent.contains("Windows NT 10.0"),
+                        "windows UA missing NT token: {}",
+                        fp.user_agent
+                    );
+                    assert_eq!(fp.nav_platform(), "Win32");
+                    assert_eq!(fp.ch_platform(), "Windows");
+                }
+            }
+            // The UA always advertises the full Chrome version, and the full
+            // version always begins with the major.
+            assert!(
+                fp.user_agent.contains(&fp.chrome_full_version),
+                "UA missing full version {}: {}",
+                fp.chrome_full_version,
+                fp.user_agent
+            );
+            assert!(
+                fp.chrome_full_version.starts_with(&fp.chrome_major),
+                "full version {} does not start with major {}",
+                fp.chrome_full_version,
+                fp.chrome_major
+            );
+        }
+    }
+
+    // Regression: screen resolutions must be partitioned by platform. A Windows
+    // fingerprint must never surface a Mac-only resolution, and vice versa.
+    #[test]
+    fn test_screen_resolution_partitioned_by_platform() {
+        // Resolutions unique to each platform's list.
+        let mac_only = [(3024u32, 1964u32), (3456, 2234)];
+        let windows_only = [(1366u32, 768u32), (1536, 864)];
+
+        // Sanity-check the assumptions against the actual consts.
+        for res in &mac_only {
+            assert!(SCREEN_RESOLUTIONS_MAC.contains(res));
+            assert!(!SCREEN_RESOLUTIONS_WINDOWS.contains(res));
+        }
+        for res in &windows_only {
+            assert!(SCREEN_RESOLUTIONS_WINDOWS.contains(res));
+            assert!(!SCREEN_RESOLUTIONS_MAC.contains(res));
+        }
+
+        for _ in 0..300 {
+            let fp = Fingerprint::random();
+            let res = (fp.screen_width, fp.screen_height);
+            match fp.platform {
+                Platform::Windows => {
+                    assert!(
+                        !mac_only.contains(&res),
+                        "windows fingerprint reported mac-only resolution {:?}",
+                        res
+                    );
+                    assert!(
+                        SCREEN_RESOLUTIONS_WINDOWS.contains(&res),
+                        "windows resolution {:?} not in windows list",
+                        res
+                    );
+                }
+                Platform::MacOS => {
+                    assert!(
+                        !windows_only.contains(&res),
+                        "mac fingerprint reported windows-only resolution {:?}",
+                        res
+                    );
+                    assert!(
+                        SCREEN_RESOLUTIONS_MAC.contains(&res),
+                        "mac resolution {:?} not in mac list",
+                        res
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_windows_ua_is_coherent() {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36";
+        let fp = Fingerprint::resolve(Some(ua), None);
+        assert_eq!(fp.platform, Platform::Windows);
+        assert_eq!(fp.chrome_major, "140");
+        assert_eq!(fp.user_agent, ua, "explicit UA must be preserved verbatim");
+        assert!(
+            WEBGL_RENDERERS_WINDOWS.contains(&fp.webgl_renderer.as_str()),
+            "windows fp got non-windows renderer: {}",
+            fp.webgl_renderer
+        );
+    }
+
+    #[test]
+    fn test_resolve_mac_ua_is_coherent() {
+        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36";
+        let fp = Fingerprint::resolve(Some(ua), None);
+        assert_eq!(fp.platform, Platform::MacOS);
+        assert_eq!(fp.chrome_major, "140");
+        assert_eq!(fp.user_agent, ua, "explicit UA must be preserved verbatim");
+        assert_eq!(fp.nav_platform(), "MacIntel");
+        assert!(
+            WEBGL_RENDERERS_MAC.contains(&fp.webgl_renderer.as_str()),
+            "mac fp got non-mac renderer: {}",
+            fp.webgl_renderer
+        );
+    }
+
+    #[test]
+    fn test_resolve_applies_timezone() {
+        let fp = Fingerprint::resolve(None, Some("Asia/Tokyo"));
+        assert_eq!(fp.timezone, "Asia/Tokyo");
+    }
+
+    #[test]
+    fn test_resolve_ua_without_chrome_token_falls_back() {
+        // A UA with no "Chrome/" token must still yield a plausible Chrome
+        // full version via the fallback branch.
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36";
+        let fp = Fingerprint::resolve(Some(ua), None);
+        assert!(
+            !fp.chrome_full_version.is_empty(),
+            "fallback should populate chrome_full_version"
+        );
+        assert!(
+            fp.chrome_full_version.starts_with(&fp.chrome_major),
+            "fallback full version {} must start with major {}",
+            fp.chrome_full_version,
+            fp.chrome_major
+        );
+    }
+
+    #[test]
+    fn test_ch_brands_shape() {
+        let fp = Fingerprint::resolve(
+            Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36"),
+            None,
+        );
+        let brands = fp.ch_brands();
+        assert_eq!(brands.len(), 3);
+        assert!(
+            brands.contains(&("Google Chrome".to_string(), "140".to_string())),
+            "ch_brands must include Google Chrome with major version: {:?}",
+            brands
+        );
+        assert!(
+            brands.iter().any(|(b, _)| b == "Not?A_Brand"),
+            "ch_brands must include a GREASE Not?A_Brand entry: {:?}",
+            brands
+        );
+    }
+
+    #[test]
+    fn test_ch_full_version_brands_shape() {
+        let fp = Fingerprint::resolve(
+            Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36"),
+            None,
+        );
+        let brands = fp.ch_full_version_brands();
+        assert_eq!(brands.len(), 3);
+        assert!(
+            brands.contains(&("Google Chrome".to_string(), "140.0.7312.86".to_string())),
+            "ch_full_version_brands must include Google Chrome with full version: {:?}",
+            brands
+        );
+        assert!(
+            brands.iter().any(|(b, _)| b == "Not?A_Brand"),
+            "ch_full_version_brands must include a GREASE Not?A_Brand entry: {:?}",
+            brands
+        );
     }
 }

@@ -240,9 +240,19 @@ impl Session {
                 user_agent: user_agent.to_string(),
                 accept_language: accept_language.map(String::from),
                 platform: None,
+                user_agent_metadata: None,
             },
         )
         .await
+    }
+
+    /// Override the User-Agent together with its client-hint metadata.
+    pub async fn set_user_agent_full(
+        &self,
+        override_opts: EmulationSetUserAgentOverride,
+    ) -> Result<()> {
+        self.send_void("Emulation.setUserAgentOverride", &override_opts)
+            .await
     }
 
     /// Ignore TLS certificate errors for this session.

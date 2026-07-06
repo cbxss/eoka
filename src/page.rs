@@ -25,8 +25,8 @@ async fn sleep_ms(ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
 }
 
-/// Escape a string for safe use in JavaScript string literals (single pass)
-fn escape_js_string(s: &str) -> String {
+/// Escape a string for safe use in JavaScript string literals (single pass).
+pub(crate) fn escape_js_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -37,7 +37,7 @@ fn escape_js_string(s: &str) -> String {
             '`' => out.push_str("\\`"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
-            '\0' => out.push_str("\\0"),
+            '\0' => out.push_str("\\x00"),
             '\u{2028}' => out.push_str("\\u2028"),
             '\u{2029}' => out.push_str("\\u2029"),
             '$' if chars.peek() == Some(&'{') => {
@@ -50,14 +50,23 @@ fn escape_js_string(s: &str) -> String {
     out
 }
 
+/// Whether a CDP error message names a missing/stale backend node.
+fn is_missing_node_message(message: &str) -> bool {
+    message.contains("Could not find node") || message.contains("No node with given id")
+}
+
+/// Check if a CDP error indicates the cached node id is no longer valid.
+fn is_stale_node_error(e: &Error) -> bool {
+    matches!(e, Error::Cdp { message, .. } if is_missing_node_message(message))
+}
+
 /// Check if a CDP error is an element-related error (not found, not visible, etc.)
 fn is_element_cdp_error(e: &Error) -> bool {
     match e {
         Error::ElementNotFound(_) | Error::ElementNotVisible { .. } => true,
         Error::Cdp { message, .. } => {
             message.contains("box model")
-                || message.contains("Could not find node")
-                || message.contains("No node with given id")
+                || is_missing_node_message(message)
                 || message.contains("Node is not an element")
         }
         _ => false,
@@ -81,12 +90,54 @@ pub enum TextMatch {
 pub struct Page {
     session: Session,
     config: Arc<StealthConfig>,
+    /// Cached root `DOM.getDocument` node id (invalidated on navigation).
+    root_node: std::sync::Mutex<Option<i32>>,
+    /// Randomized per-page property key for the network-idle request counter.
+    net_idle_key: String,
 }
 
 impl Page {
     /// Create a new Page wrapping a CDP session
     pub(crate) fn new(session: Session, config: Arc<StealthConfig>) -> Self {
-        Self { session, config }
+        let net_idle_key = format!("_{:012x}", fastrand::u64(..) & 0xffff_ffff_ffff);
+        Self {
+            session,
+            config,
+            root_node: std::sync::Mutex::new(None),
+            net_idle_key,
+        }
+    }
+
+    /// Return the cached root document node id, fetching it once if needed.
+    async fn document_node(&self) -> Result<i32> {
+        if let Some(id) = *self.root_node.lock().unwrap() {
+            return Ok(id);
+        }
+        let doc = self.session.get_document(Some(0)).await?;
+        *self.root_node.lock().unwrap() = Some(doc.node_id);
+        Ok(doc.node_id)
+    }
+
+    /// Drop the cached document node (call after navigation).
+    fn invalidate_document(&self) {
+        *self.root_node.lock().unwrap() = None;
+    }
+
+    /// Run an operation against the cached document node, retrying once if stale.
+    async fn with_document<T, F, Fut>(&self, op: F) -> Result<T>
+    where
+        F: Fn(i32) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let doc = self.document_node().await?;
+        match op(doc).await {
+            Err(ref e) if is_stale_node_error(e) => {
+                self.invalidate_document();
+                let doc = self.document_node().await?;
+                op(doc).await
+            }
+            other => other,
+        }
     }
 
     /// Get the underlying CDP session
@@ -128,17 +179,23 @@ impl Page {
 
     /// Reload the page
     pub async fn reload(&self) -> Result<()> {
-        self.session.reload(false).await
+        self.session.reload(false).await?;
+        self.invalidate_document();
+        Ok(())
     }
 
     /// Go back in history
     pub async fn back(&self) -> Result<()> {
-        self.session.go_back().await
+        self.session.go_back().await?;
+        self.invalidate_document();
+        Ok(())
     }
 
     /// Go forward in history
     pub async fn forward(&self) -> Result<()> {
-        self.session.go_forward().await
+        self.session.go_forward().await?;
+        self.invalidate_document();
+        Ok(())
     }
     /// Get current URL
     pub async fn url(&self) -> Result<String> {
@@ -175,8 +232,9 @@ impl Page {
     }
     /// Find an element by CSS selector
     pub async fn find(&self, selector: &str) -> Result<Element<'_>> {
-        let doc = self.session.get_document(Some(0)).await?;
-        let node_id = self.session.query_selector(doc.node_id, selector).await?;
+        let node_id = self
+            .with_document(|doc| self.session.query_selector(doc, selector))
+            .await?;
 
         if node_id == 0 {
             return Err(Error::ElementNotFound(selector.to_string()));
@@ -190,10 +248,8 @@ impl Page {
 
     /// Find all elements matching a CSS selector
     pub async fn find_all(&self, selector: &str) -> Result<Vec<Element<'_>>> {
-        let doc = self.session.get_document(Some(0)).await?;
         let node_ids = self
-            .session
-            .query_selector_all(doc.node_id, selector)
+            .with_document(|doc| self.session.query_selector_all(doc, selector))
             .await?;
 
         Ok(node_ids
@@ -483,7 +539,12 @@ impl Page {
     pub async fn human_fill(&self, selector: &str, value: &str) -> Result<()> {
         self.human_click(selector).await?;
         sleep_ms(SETTLE_MS).await;
-        self.execute("document.activeElement.select()").await?;
+        let escaped = escape_js_string(selector);
+        let select_js = format!(
+            "(() => {{ const el = document.querySelector('{escaped}'); \
+             if (el) {{ el.focus(); if (typeof el.select === 'function') el.select(); }} }})()"
+        );
+        self.execute(&select_js).await?;
         sleep_ms(INTERACTION_DELAY_MS).await;
         self.human_type_text(value).await
     }
@@ -649,8 +710,29 @@ impl Page {
     async fn navigate_impl(&self, url: &str, referrer: Option<&str>) -> Result<()> {
         let result = self.session.navigate(url, referrer).await?;
         Self::check_nav_result(&result)?;
-        sleep_ms(SETTLE_MS).await;
+        self.invalidate_document();
+        self.wait_for_load(self.config.cdp_timeout.saturating_mul(1000))
+            .await;
         Ok(())
+    }
+
+    /// Poll `document.readyState` until interactive/complete or the budget elapses.
+    async fn wait_for_load(&self, timeout_ms: u64) {
+        let start = std::time::Instant::now();
+        loop {
+            let state: String = self
+                .evaluate_sync("document.readyState")
+                .await
+                .unwrap_or_default();
+            if state == "complete" || state == "interactive" {
+                break;
+            }
+            if start.elapsed().as_millis() as u64 >= timeout_ms {
+                break;
+            }
+            sleep_ms(POLL_INTERVAL_MS).await;
+        }
+        sleep_ms(SETTLE_MS).await;
     }
 
     /// Disable CSP enforcement for the current page.
@@ -736,7 +818,16 @@ impl Page {
                 "Element '{}' still visible after {}ms",
                 selector, timeout_ms
             ),
-            || async { self.find(selector).await.is_err().then_some(()) },
+            || async {
+                match self.find(selector).await {
+                    Err(Error::ElementNotFound(_)) => Some(()),
+                    Ok(el) => match el.is_visible().await {
+                        Ok(false) => Some(()),
+                        _ => None,
+                    },
+                    Err(_) => None,
+                }
+            },
         )
         .await
     }
@@ -855,55 +946,44 @@ impl Page {
         let timeout = std::time::Duration::from_millis(timeout_ms);
         let idle_duration = std::time::Duration::from_millis(idle_time_ms);
 
-        // Use JavaScript to monitor network activity
-        let check_idle_js = r#"
-            (() => {
-                // Check if there are pending fetches/XHRs
-                if (window.__eoka_pending_requests === undefined) {
-                    window.__eoka_pending_requests = 0;
-
-                    // Intercept fetch
-                    const originalFetch = window.fetch;
-                    window.fetch = function(...args) {
-                        window.__eoka_pending_requests++;
-                        return originalFetch.apply(this, args).finally(() => {
-                            window.__eoka_pending_requests--;
-                        });
-                    };
-
-                    // Intercept XHR
-                    const originalOpen = XMLHttpRequest.prototype.open;
-                    const originalSend = XMLHttpRequest.prototype.send;
-                    XMLHttpRequest.prototype.open = function(...args) {
-                        this.__eoka_tracked = true;
-                        return originalOpen.apply(this, args);
-                    };
-                    XMLHttpRequest.prototype.send = function(...args) {
-                        if (this.__eoka_tracked) {
-                            window.__eoka_pending_requests++;
-                            this.addEventListener('loadend', () => {
-                                window.__eoka_pending_requests--;
-                            });
-                        }
-                        return originalSend.apply(this, args);
-                    };
-                }
-                return window.__eoka_pending_requests;
-            })()
-        "#;
-
-        // Install the interceptors (use evaluate_sync to avoid blocking on busy JS thread).
-        // Re-install on every poll iteration since full-page navigations destroy the
-        // previous window context along with our __eoka_pending_requests counter.
-        let _: i32 = self.evaluate_sync(check_idle_js).await.unwrap_or(0);
+        let key = &self.net_idle_key;
+        let check_idle_js = format!(
+            r#"
+            (() => {{
+                var K = '{key}';
+                if (window[K] === undefined) {{
+                    Object.defineProperty(window, K, {{
+                        value: {{ n: 0 }}, writable: true, enumerable: false, configurable: true
+                    }});
+                    var st = window[K];
+                    const of = window.fetch;
+                    const wf = function fetch(...a) {{
+                        st.n++;
+                        return of.apply(this, a).finally(() => {{ st.n--; }});
+                    }};
+                    try {{ wf.toString = () => 'function fetch() {{ [native code] }}'; }} catch(e) {{}}
+                    window.fetch = wf;
+                    const oo = XMLHttpRequest.prototype.open;
+                    const os = XMLHttpRequest.prototype.send;
+                    XMLHttpRequest.prototype.open = function(...a) {{ this[K] = true; return oo.apply(this, a); }};
+                    XMLHttpRequest.prototype.send = function(...a) {{
+                        if (this[K]) {{
+                            st.n++;
+                            this.addEventListener('loadend', () => {{ st.n--; }});
+                        }}
+                        return os.apply(this, a);
+                    }};
+                }}
+                var pend = window[K].n;
+                return (document.readyState === 'complete') ? pend : -1;
+            }})()
+        "#
+        );
 
         let mut idle_start: Option<std::time::Instant> = None;
 
         loop {
-            // Re-install interceptors if the page navigated (counter will be undefined
-            // on the new document). This is cheap — the guard inside check_idle_js
-            // skips setup when __eoka_pending_requests is already defined.
-            let pending: i32 = self.evaluate_sync(check_idle_js).await.unwrap_or(0);
+            let pending: i32 = self.evaluate_sync(&check_idle_js).await.unwrap_or(-1);
 
             if pending == 0 {
                 match idle_start {
@@ -998,6 +1078,7 @@ impl Page {
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
+        let attempts = attempts.max(1);
         let mut last_error = String::new();
 
         for attempt in 1..=attempts {
@@ -1197,6 +1278,9 @@ fn parse_key_combo(combo: &str) -> (i32, &str) {
             _ => key = parts[i],
         }
     }
+    if key.is_empty() {
+        key = "+";
+    }
     (mods, key)
 }
 
@@ -1357,7 +1441,9 @@ impl<'a> Element<'a> {
     /// Get the element's center coordinates
     pub async fn center(&self) -> Result<(f64, f64)> {
         let model = self.page.session.get_box_model(self.node_id).await?;
-        Ok(model.center())
+        model.try_center().ok_or_else(|| Error::ElementNotVisible {
+            selector: format!("node {}", self.node_id),
+        })
     }
 
     /// Click this element
@@ -1640,9 +1726,90 @@ mod tests {
         assert_eq!(escape_js_string("line1\nline2"), "line1\\nline2");
         assert_eq!(escape_js_string("back\\slash"), "back\\\\slash");
         assert_eq!(escape_js_string("${var}"), "\\${var}");
-        // Null byte and Unicode line terminators must be escaped
-        assert_eq!(escape_js_string("a\0b"), "a\\0b");
+        // Null byte escaped as \x00
+        assert_eq!(escape_js_string("a\0b"), "a\\x00b");
+        assert_eq!(escape_js_string("a\0"), "a\\x00");
+        assert_eq!(escape_js_string("a\u{0}1"), "a\\x001");
         assert_eq!(escape_js_string("a\u{2028}b"), "a\\u2028b");
         assert_eq!(escape_js_string("a\u{2029}b"), "a\\u2029b");
+    }
+
+    #[test]
+    fn test_escape_js_string_null_is_hex_not_octal() {
+        // '\0' must become the hex escape \x00, never the octal \0 (which
+        // would be ambiguous when followed by a digit and could be parsed
+        // as an octal escape by a JS engine).
+        assert_eq!(escape_js_string("\0"), "\\x00");
+        assert_ne!(escape_js_string("\0"), "\\0");
+        // Followed by a digit: must stay "\x001", not "\01".
+        assert_eq!(escape_js_string("a\u{0}1"), "a\\x001");
+    }
+
+    #[test]
+    fn test_escape_js_string_all_special_chars() {
+        assert_eq!(escape_js_string("'"), "\\'");
+        assert_eq!(escape_js_string("\""), "\\\"");
+        assert_eq!(escape_js_string("`"), "\\`");
+        assert_eq!(escape_js_string("\\"), "\\\\");
+        assert_eq!(escape_js_string("\n"), "\\n");
+        assert_eq!(escape_js_string("\r"), "\\r");
+        assert_eq!(escape_js_string("${"), "\\${");
+        assert_eq!(escape_js_string("\u{2028}"), "\\u2028");
+        assert_eq!(escape_js_string("\u{2029}"), "\\u2029");
+    }
+
+    #[test]
+    fn test_parse_key_combo_literal_plus() {
+        // A lone "+" is a literal key, not a separator artifact.
+        let (mods, key) = parse_key_combo("+");
+        assert_eq!(mods, 0);
+        assert_eq!(key, "+");
+    }
+
+    #[test]
+    fn test_parse_key_combo_shift_plus() {
+        // "Shift++" is SHIFT modifier plus the literal "+" key.
+        use crate::cdp::types::modifiers;
+        let (mods, key) = parse_key_combo("Shift++");
+        assert_eq!(mods, modifiers::SHIFT);
+        assert_eq!(key, "+");
+    }
+
+    #[test]
+    fn test_stale_node_error_detection() {
+        let stale = Error::Cdp {
+            method: "DOM.resolveNode".to_string(),
+            code: -32000,
+            message: "Could not find node with given id".to_string(),
+        };
+        assert!(is_stale_node_error(&stale));
+        assert!(is_element_cdp_error(&stale));
+    }
+
+    #[test]
+    fn test_box_model_error_is_element_but_not_stale() {
+        let box_model = Error::Cdp {
+            method: "DOM.getBoxModel".to_string(),
+            code: -32000,
+            message: "box model could not be computed".to_string(),
+        };
+        // "box model" substring makes it an element error...
+        assert!(is_element_cdp_error(&box_model));
+        // ...but it is not a stale-node error.
+        assert!(!is_stale_node_error(&box_model));
+    }
+
+    #[test]
+    fn test_element_not_found_is_element_but_not_stale() {
+        let not_found = Error::ElementNotFound("x".into());
+        assert!(is_element_cdp_error(&not_found));
+        assert!(!is_stale_node_error(&not_found));
+    }
+
+    #[test]
+    fn test_missing_node_message_variants() {
+        assert!(is_missing_node_message("Could not find node with given id"));
+        assert!(is_missing_node_message("No node with given id found"));
+        assert!(!is_missing_node_message("box model could not be computed"));
     }
 }

@@ -10,18 +10,19 @@ use std::sync::Arc;
 static BROWSER_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use crate::cdp::transport::launch_chrome;
+use crate::cdp::types::{EmulationSetUserAgentOverride, UserAgentBrandVersion, UserAgentMetadata};
 use crate::cdp::{Connection, Transport};
 use crate::error::{Error, Result};
 use crate::page::Page;
-use crate::stealth::{build_evasion_script, find_chrome, random_user_agent, ChromePatcher};
+use crate::stealth::fingerprint::Fingerprint;
+use crate::stealth::{build_evasion_script_for, find_chrome, ChromePatcher};
 use crate::StealthConfig;
 
-/// Stealth browser arguments (pre-built for zero allocation)
-fn stealth_args(config: &StealthConfig) -> Vec<String> {
+/// Stealth browser arguments (pre-built for zero allocation).
+fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String> {
     let mut args = vec![
         // Core automation hiding
         "--disable-blink-features=AutomationControlled".into(),
-        "--disable-automation".into(),
         "--disable-features=IsolateOrigins,site-per-process,AutomationControlled,EnableAutomation"
             .into(),
         "--enable-features=NetworkService,NetworkServiceInProcess".into(),
@@ -36,7 +37,6 @@ fn stealth_args(config: &StealthConfig) -> Vec<String> {
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--no-sandbox".into(),
-        "--disable-extensions-except=".into(),
         "--disable-default-apps".into(),
         "--disable-component-extensions-with-background-pages".into(),
         "--disable-hang-monitor".into(),
@@ -49,7 +49,7 @@ fn stealth_args(config: &StealthConfig) -> Vec<String> {
         "--disable-client-side-phishing-detection".into(),
         "--password-store=basic".into(),
         "--use-mock-keychain".into(),
-        "--excludeSwitches=enable-automation".into(),
+        "--lang=en-US".into(),
         // Window size
         format!(
             "--window-size={},{}",
@@ -58,8 +58,7 @@ fn stealth_args(config: &StealthConfig) -> Vec<String> {
     ];
 
     // User agent
-    let user_agent = config.user_agent.clone().unwrap_or_else(random_user_agent);
-    args.push(format!("--user-agent={}", user_agent));
+    args.push(format!("--user-agent={}", fingerprint.user_agent));
 
     // Headless mode
     if config.headless {
@@ -87,14 +86,44 @@ pub struct TabInfo {
     pub url: String,
 }
 
+/// Build the `Emulation.setUserAgentOverride` payload from the resolved fingerprint.
+fn ua_override_for(fp: &Fingerprint) -> EmulationSetUserAgentOverride {
+    let to_brands = |v: Vec<(String, String)>| -> Vec<UserAgentBrandVersion> {
+        v.into_iter()
+            .map(|(brand, version)| UserAgentBrandVersion { brand, version })
+            .collect()
+    };
+    let architecture = if fp.webgl_renderer.contains("Apple M") {
+        "arm"
+    } else {
+        "x86"
+    };
+    EmulationSetUserAgentOverride {
+        user_agent: fp.user_agent.clone(),
+        accept_language: Some("en-US,en;q=0.9".to_string()),
+        platform: Some(fp.nav_platform().to_string()),
+        user_agent_metadata: Some(UserAgentMetadata {
+            brands: to_brands(fp.ch_brands()),
+            full_version_list: to_brands(fp.ch_full_version_brands()),
+            platform: fp.ch_platform().to_string(),
+            platform_version: fp.platform_version.clone(),
+            architecture: architecture.to_string(),
+            model: String::new(),
+            mobile: false,
+            bitness: "64".to_string(),
+            wow64: false,
+        }),
+    }
+}
+
 /// The main stealth browser
 pub struct Browser {
     connection: Connection,
     config: Arc<StealthConfig>,
     /// User data directory (cleaned up on close; None when connecting to existing instance)
     user_data_dir: Option<PathBuf>,
-    /// Patched Chrome binary directory (cleaned up on close to avoid ~400MB disk leak)
-    patched_dir: Option<PathBuf>,
+    /// Resolved fingerprint (None in live-session mode).
+    fingerprint: Option<Fingerprint>,
     /// Evasion script (cached)
     evasion_script: String,
 }
@@ -121,51 +150,59 @@ impl Browser {
         let _ = std::fs::remove_dir_all(&user_data_dir);
         std::fs::create_dir_all(&user_data_dir)?;
 
-        // Find Chrome path
-        let chrome_path = match &config.chrome_path {
-            Some(p) => PathBuf::from(p),
-            None => find_chrome()?,
+        let fingerprint =
+            Fingerprint::resolve(config.user_agent.as_deref(), config.timezone.as_deref());
+
+        // Clean up the temp user-data-dir on any failure past this point.
+        let launch = async {
+            let chrome_path = match &config.chrome_path {
+                Some(p) => PathBuf::from(p),
+                None => find_chrome()?,
+            };
+
+            let chrome_path = if config.patch_binary {
+                ChromePatcher::new(&chrome_path)?.get_patched_path()?
+            } else {
+                chrome_path
+            };
+
+            // Build args
+            let mut args = stealth_args(&config, &fingerprint);
+            args.push(format!("--user-data-dir={}", user_data_dir.display()));
+
+            tracing::info!("Launching Chrome from {:?}", chrome_path);
+            let (child, ws_url) = launch_chrome(&chrome_path, &args)?;
+
+            let proxy_auth = match (&config.proxy_username, &config.proxy_password) {
+                (Some(u), Some(p)) => Some((u.clone(), p.clone())),
+                _ => None,
+            };
+            let transport =
+                Transport::new_with_options(child, &ws_url, proxy_auth, config.cdp_timeout)?;
+            let connection = Connection::new(transport);
+
+            let version = connection.version().await?;
+            tracing::info!("Connected to Chrome: {}", version.product);
+
+            Ok::<Connection, Error>(connection)
+        }
+        .await;
+
+        let connection = match launch {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&user_data_dir);
+                return Err(e);
+            }
         };
 
-        // Optionally patch the binary
-        let (chrome_path, patched_dir) = if config.patch_binary {
-            let patcher = ChromePatcher::new(&chrome_path)?;
-            let patched = patcher.get_patched_path()?;
-            let dir = patched.parent().map(|p| p.to_path_buf());
-            (patched, dir)
-        } else {
-            (chrome_path, None)
-        };
-
-        // Build args
-        let mut args = stealth_args(&config);
-        args.push(format!("--user-data-dir={}", user_data_dir.display()));
-
-        // Launch Chrome
-        tracing::info!("Launching Chrome from {:?}", chrome_path);
-        let (child, ws_url) = launch_chrome(&chrome_path, &args)?;
-
-        // Create transport — with proxy auth and configurable timeout
-        let proxy_auth = match (&config.proxy_username, &config.proxy_password) {
-            (Some(u), Some(p)) => Some((u.clone(), p.clone())),
-            _ => None,
-        };
-        let transport =
-            Transport::new_with_options(child, &ws_url, proxy_auth, config.cdp_timeout)?;
-        let connection = Connection::new(transport);
-
-        // Get browser version
-        let version = connection.version().await?;
-        tracing::info!("Connected to Chrome: {}", version.product);
-
-        // Build evasion script
-        let evasion_script = build_evasion_script(&config);
+        let evasion_script = build_evasion_script_for(&config, &fingerprint);
 
         Ok(Self {
             connection,
             config,
             user_data_dir: Some(user_data_dir),
-            patched_dir,
+            fingerprint: Some(fingerprint),
             evasion_script,
         })
     }
@@ -192,17 +229,19 @@ impl Browser {
         let connection = Connection::new(transport);
         let version = connection.version().await?;
         tracing::info!("Connected to Chrome: {}", version.product);
-        // Skip building the evasion script when we won't inject it.
-        let evasion_script = if config.live_session {
-            String::new()
+        // Skip the evasion script and fingerprint for live sessions.
+        let (fingerprint, evasion_script) = if config.live_session {
+            (None, String::new())
         } else {
-            build_evasion_script(&config)
+            let fp = Fingerprint::resolve(config.user_agent.as_deref(), config.timezone.as_deref());
+            let script = build_evasion_script_for(&config, &fp);
+            (Some(fp), script)
         };
         Ok(Self {
             connection,
             config,
             user_data_dir: None,
-            patched_dir: None,
+            fingerprint,
             evasion_script,
         })
     }
@@ -232,6 +271,9 @@ impl Browser {
         }
 
         if !self.config.live_session {
+            if let Some(ref fp) = self.fingerprint {
+                session.set_user_agent_full(ua_override_for(fp)).await?;
+            }
             session
                 .add_script_to_evaluate_on_new_document(&self.evasion_script)
                 .await?;
@@ -324,13 +366,8 @@ impl Browser {
             self.connection.close().await?;
         }
 
-        // Clean up user data directory (None when connecting)
+        // Clean up user data directory (None when connecting).
         if let Some(ref dir) = self.user_data_dir {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        // Clean up patched Chrome binary directory (~400MB)
-        if let Some(ref dir) = self.patched_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
 
@@ -346,19 +383,8 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        // Best-effort cleanup of user data directory if close() wasn't called.
-        // The Transport's Drop impl handles killing the Chrome process.
+        // Best-effort cleanup of the temp user-data-dir if close() wasn't called.
         if let Some(ref dir) = self.user_data_dir {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        // Clean up patched Chrome binary directory (~400MB).
-        // Safe because `connection` is declared before `patched_dir` in the struct,
-        // so Rust drops it first — killing Chrome via Transport::Drop before we
-        // attempt to delete the patched binary. On Unix, remove_dir_all succeeds
-        // even if the binary is still memory-mapped (unlink semantics).
-        // Prefer calling `close().await` for an explicit, ordered shutdown.
-        if let Some(ref dir) = self.patched_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
     }

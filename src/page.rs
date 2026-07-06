@@ -5,9 +5,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::cdp::{Cookie, MouseButton, MouseEventType, Session};
+use crate::cdp::{MouseButton, MouseEventType, Session};
 use crate::error::{Error, Result};
 use crate::keyboard::{key_to_codes, parse_key_combo};
+use crate::session::SessionCookie;
 use crate::stealth::Human;
 use crate::StealthConfig;
 
@@ -643,9 +644,23 @@ impl Page {
         }
         Ok(result.result)
     }
-    /// Get all cookies
-    pub async fn cookies(&self) -> Result<Vec<Cookie>> {
-        self.session.get_cookies(None).await
+    /// Get all cookies as domain `SessionCookie`s (no `cdp::types` leak).
+    pub async fn cookies(&self) -> Result<Vec<SessionCookie>> {
+        let cookies = self.session.get_cookies(None).await?;
+        Ok(cookies
+            .into_iter()
+            .map(|c| SessionCookie {
+                name: c.name,
+                value: c.value,
+                domain: c.domain,
+                path: c.path,
+                secure: c.secure,
+                http_only: c.http_only,
+                same_site: c.same_site,
+                // Session cookies have no meaningful expiry.
+                expires: if c.session { None } else { Some(c.expires) },
+            })
+            .collect())
     }
 
     /// Set a cookie
@@ -680,12 +695,23 @@ impl Page {
         self.session.clear_all_cookies().await
     }
 
-    /// Bulk-import cookies (e.g., restored from a prior dump_storage call).
-    pub async fn set_cookies_bulk(
-        &self,
-        cookies: Vec<crate::cdp::types::NetworkSetCookie>,
-    ) -> Result<()> {
-        self.session.set_cookies(cookies).await
+    /// Bulk-import cookies (e.g., restored from a prior `cookies()` dump).
+    pub async fn set_cookies_bulk(&self, cookies: Vec<SessionCookie>) -> Result<()> {
+        let cdp_cookies = cookies
+            .into_iter()
+            .map(|c| crate::cdp::types::NetworkSetCookie {
+                name: c.name,
+                value: c.value,
+                url: None,
+                domain: Some(c.domain),
+                path: Some(c.path),
+                secure: Some(c.secure),
+                http_only: Some(c.http_only),
+                same_site: c.same_site,
+                expires: c.expires,
+            })
+            .collect();
+        self.session.set_cookies(cdp_cookies).await
     }
 
     /// Set extra HTTP headers sent with every subsequent request from this page.

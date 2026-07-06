@@ -2,6 +2,12 @@
 //!
 //! These replace the massive chromiumoxide-generated types with a minimal set
 //! that's just enough for stealth browser automation.
+//!
+//! Now that this module is crate-private (no longer re-exported), some fields
+//! are deserialized from CDP responses but never read internally, and a few
+//! protocol structs are only used by escape-hatch wrappers. Allow dead code
+//! rather than prune fields the protocol still sends.
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -215,6 +221,9 @@ pub struct InputDispatchMouseEvent {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+// Variants serialize to the exact CDP event-type strings ("mousePressed", …),
+// so the shared `Mouse` prefix is intentional and must not be renamed.
+#[allow(clippy::enum_variant_names)]
 pub enum MouseEventType {
     MousePressed,
     MouseReleased,

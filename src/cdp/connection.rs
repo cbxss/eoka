@@ -15,7 +15,7 @@ pub struct Connection {
 
 impl Connection {
     /// Create a new connection wrapping a transport
-    pub fn new(transport: Transport) -> Self {
+    pub(crate) fn new(transport: Transport) -> Self {
         Self {
             transport: Arc::new(transport),
         }
@@ -27,14 +27,14 @@ impl Connection {
     }
 
     /// Get browser version info
-    pub async fn version(&self) -> Result<BrowserGetVersionResult> {
+    pub(crate) async fn version(&self) -> Result<BrowserGetVersionResult> {
         self.transport
             .send("Browser.getVersion", &BrowserGetVersion {})
             .await
     }
 
     /// Create a new target (tab)
-    pub async fn create_target(
+    pub(crate) async fn create_target(
         &self,
         url: &str,
         width: Option<u32>,
@@ -55,7 +55,7 @@ impl Connection {
     }
 
     /// Attach to a target and get a session
-    pub async fn attach_to_target(&self, target_id: &str) -> Result<Session> {
+    pub(crate) async fn attach_to_target(&self, target_id: &str) -> Result<Session> {
         let result: TargetAttachToTargetResult = self
             .transport
             .send(
@@ -75,7 +75,7 @@ impl Connection {
     }
 
     /// Close a target
-    pub async fn close_target(&self, target_id: &str) -> Result<bool> {
+    pub(crate) async fn close_target(&self, target_id: &str) -> Result<bool> {
         let result: TargetCloseTargetResult = self
             .transport
             .send(
@@ -89,7 +89,7 @@ impl Connection {
     }
 
     /// Get all targets (tabs)
-    pub async fn get_targets(&self) -> Result<Vec<TargetInfo>> {
+    pub(crate) async fn get_targets(&self) -> Result<Vec<TargetInfo>> {
         let result: TargetGetTargetsResult = self
             .transport
             .send("Target.getTargets", &TargetGetTargets {})
@@ -98,7 +98,7 @@ impl Connection {
     }
 
     /// Activate (focus) a target
-    pub async fn activate_target(&self, target_id: &str) -> Result<()> {
+    pub(crate) async fn activate_target(&self, target_id: &str) -> Result<()> {
         self.send_void(
             "Target.activateTarget",
             &TargetActivateTarget {
@@ -117,7 +117,7 @@ impl Connection {
     }
 
     /// Close the browser
-    pub async fn close(&self) -> Result<()> {
+    pub(crate) async fn close(&self) -> Result<()> {
         let _ = self.send_void("Browser.close", &BrowserClose {}).await;
         self.transport.close().await
     }
@@ -167,18 +167,22 @@ impl Session {
 
     /// Enable the Fetch domain, optionally handling auth challenges (proxy auth).
     /// Must be called per-session (per-tab).
-    pub async fn fetch_enable(&self, handle_auth_requests: bool) -> Result<()> {
+    pub(crate) async fn fetch_enable(&self, handle_auth_requests: bool) -> Result<()> {
         self.fetch_enable_interception(vec![], handle_auth_requests)
             .await
     }
 
     /// Enable page events
-    pub async fn page_enable(&self) -> Result<()> {
+    pub(crate) async fn page_enable(&self) -> Result<()> {
         self.send_void("Page.enable", &PageEnable {}).await
     }
 
     /// Navigate to a URL, optionally with a custom Referer header
-    pub async fn navigate(&self, url: &str, referrer: Option<&str>) -> Result<PageNavigateResult> {
+    pub(crate) async fn navigate(
+        &self,
+        url: &str,
+        referrer: Option<&str>,
+    ) -> Result<PageNavigateResult> {
         self.send(
             "Page.navigate",
             &PageNavigate {
@@ -191,7 +195,7 @@ impl Session {
 
     /// Set extra HTTP headers sent with every request on this session.
     /// Pass an empty map to clear previously set headers.
-    pub async fn set_extra_headers(
+    pub(crate) async fn set_extra_headers(
         &self,
         headers: std::collections::HashMap<String, String>,
     ) -> Result<()> {
@@ -203,13 +207,13 @@ impl Session {
     }
 
     /// Remove all extra HTTP headers previously set via set_extra_headers.
-    pub async fn clear_extra_headers(&self) -> Result<()> {
+    pub(crate) async fn clear_extra_headers(&self) -> Result<()> {
         self.set_extra_headers(std::collections::HashMap::new())
             .await
     }
 
     /// Clear all browser cookies for this context.
-    pub async fn clear_all_cookies(&self) -> Result<()> {
+    pub(crate) async fn clear_all_cookies(&self) -> Result<()> {
         self.send_void(
             "Network.clearBrowserCookies",
             &NetworkClearBrowserCookies {},
@@ -218,20 +222,20 @@ impl Session {
     }
 
     /// Bulk-set multiple cookies at once.
-    pub async fn set_cookies(&self, cookies: Vec<NetworkSetCookie>) -> Result<()> {
+    pub(crate) async fn set_cookies(&self, cookies: Vec<NetworkSetCookie>) -> Result<()> {
         self.send_void("Network.setCookies", &NetworkSetCookies { cookies })
             .await
     }
 
     /// Bypass CSP enforcement for the current page.
     /// Must be called before navigation to take effect.
-    pub async fn set_bypass_csp(&self, enabled: bool) -> Result<()> {
+    pub(crate) async fn set_bypass_csp(&self, enabled: bool) -> Result<()> {
         self.send_void("Page.setBypassCSP", &PageSetBypassCSP { enabled })
             .await
     }
 
     /// Override the User-Agent string (and optionally Accept-Language).
-    pub async fn set_user_agent(
+    pub(crate) async fn set_user_agent(
         &self,
         user_agent: &str,
         accept_language: Option<&str>,
@@ -249,7 +253,7 @@ impl Session {
     }
 
     /// Override the User-Agent together with its client-hint metadata.
-    pub async fn set_user_agent_full(
+    pub(crate) async fn set_user_agent_full(
         &self,
         override_opts: EmulationSetUserAgentOverride,
     ) -> Result<()> {
@@ -258,7 +262,7 @@ impl Session {
     }
 
     /// Ignore TLS certificate errors for this session.
-    pub async fn set_ignore_cert_errors(&self, ignore: bool) -> Result<()> {
+    pub(crate) async fn set_ignore_cert_errors(&self, ignore: bool) -> Result<()> {
         self.send_void(
             "Security.setIgnoreCertificateErrors",
             &SecuritySetIgnoreCertificateErrors { ignore },
@@ -268,7 +272,11 @@ impl Session {
 
     /// Accept or dismiss a JavaScript dialog (alert / confirm / prompt).
     /// `prompt_text` is only used for prompt() dialogs.
-    pub async fn handle_dialog(&self, accept: bool, prompt_text: Option<&str>) -> Result<()> {
+    pub(crate) async fn handle_dialog(
+        &self,
+        accept: bool,
+        prompt_text: Option<&str>,
+    ) -> Result<()> {
         self.send_void(
             "Page.handleJavaScriptDialog",
             &PageHandleJavaScriptDialog {
@@ -281,7 +289,7 @@ impl Session {
 
     /// Enable Fetch domain request interception with URL patterns.
     /// `patterns` — list of URL/resource-type filters; empty matches everything.
-    pub async fn fetch_enable_interception(
+    pub(crate) async fn fetch_enable_interception(
         &self,
         patterns: Vec<RequestPattern>,
         handle_auth: bool,
@@ -301,12 +309,14 @@ impl Session {
     }
 
     /// Disable Fetch domain interception.
-    pub async fn fetch_disable(&self) -> Result<()> {
+    #[allow(dead_code)] // request-interception wrapper, kept for completeness
+    pub(crate) async fn fetch_disable(&self) -> Result<()> {
         self.send_void("Fetch.disable", &FetchDisable {}).await
     }
 
     /// Continue an intercepted request, optionally modifying URL/method/headers/body.
-    pub async fn fetch_continue(
+    #[allow(dead_code)] // request-interception wrapper, kept for completeness
+    pub(crate) async fn fetch_continue(
         &self,
         request_id: &str,
         url: Option<&str>,
@@ -330,7 +340,8 @@ impl Session {
 
     /// Fulfill an intercepted request with a synthetic response.
     /// `body` will be base64-encoded automatically.
-    pub async fn fetch_fulfill(
+    #[allow(dead_code)] // request-interception wrapper, kept for completeness
+    pub(crate) async fn fetch_fulfill(
         &self,
         request_id: &str,
         status_code: u16,
@@ -356,7 +367,8 @@ impl Session {
 
     /// Abort an intercepted request with a network error.
     /// `error_reason`: "Aborted", "AccessDenied", "AddressUnreachable", "ConnectionRefused", etc.
-    pub async fn fetch_fail(&self, request_id: &str, error_reason: &str) -> Result<()> {
+    #[allow(dead_code)] // request-interception wrapper, kept for completeness
+    pub(crate) async fn fetch_fail(&self, request_id: &str, error_reason: &str) -> Result<()> {
         self.send_void(
             "Fetch.failRequest",
             &FetchFailRequest {
@@ -368,7 +380,7 @@ impl Session {
     }
 
     /// Reload the page
-    pub async fn reload(&self, ignore_cache: bool) -> Result<()> {
+    pub(crate) async fn reload(&self, ignore_cache: bool) -> Result<()> {
         self.send_void(
             "Page.reload",
             &PageReload {
@@ -399,17 +411,20 @@ impl Session {
     }
 
     /// Go back in history
-    pub async fn go_back(&self) -> Result<()> {
+    pub(crate) async fn go_back(&self) -> Result<()> {
         self.navigate_history(-1).await
     }
 
     /// Go forward in history
-    pub async fn go_forward(&self) -> Result<()> {
+    pub(crate) async fn go_forward(&self) -> Result<()> {
         self.navigate_history(1).await
     }
 
     /// Add a script to evaluate on every new document
-    pub async fn add_script_to_evaluate_on_new_document(&self, source: &str) -> Result<String> {
+    pub(crate) async fn add_script_to_evaluate_on_new_document(
+        &self,
+        source: &str,
+    ) -> Result<String> {
         let result: PageAddScriptToEvaluateOnNewDocumentResult = self
             .send(
                 "Page.addScriptToEvaluateOnNewDocument",
@@ -424,7 +439,7 @@ impl Session {
     }
 
     /// Capture a screenshot
-    pub async fn capture_screenshot(
+    pub(crate) async fn capture_screenshot(
         &self,
         format: Option<&str>,
         quality: Option<u8>,
@@ -449,14 +464,14 @@ impl Session {
     }
 
     /// Get the frame tree
-    pub async fn get_frame_tree(&self) -> Result<FrameTree> {
+    pub(crate) async fn get_frame_tree(&self) -> Result<FrameTree> {
         let result: PageGetFrameTreeResult =
             self.send("Page.getFrameTree", &PageGetFrameTree {}).await?;
         Ok(result.frame_tree)
     }
 
     /// Dispatch a mouse event (click, move, or wheel)
-    pub async fn dispatch_mouse_event(
+    pub(crate) async fn dispatch_mouse_event(
         &self,
         event_type: MouseEventType,
         x: f64,
@@ -477,7 +492,7 @@ impl Session {
     }
 
     /// Dispatch a mouse wheel scroll event
-    pub async fn dispatch_mouse_wheel(
+    pub(crate) async fn dispatch_mouse_wheel(
         &self,
         x: f64,
         y: f64,
@@ -497,12 +512,15 @@ impl Session {
     }
 
     /// Dispatch a raw mouse event with full control over all fields
-    pub async fn dispatch_mouse_event_full(&self, event: InputDispatchMouseEvent) -> Result<()> {
+    pub(crate) async fn dispatch_mouse_event_full(
+        &self,
+        event: InputDispatchMouseEvent,
+    ) -> Result<()> {
         self.send_void("Input.dispatchMouseEvent", &event).await
     }
 
     /// Dispatch a key event
-    pub async fn dispatch_key_event(
+    pub(crate) async fn dispatch_key_event(
         &self,
         event_type: KeyEventType,
         key: Option<&str>,
@@ -522,7 +540,7 @@ impl Session {
     }
 
     /// Insert text at current cursor position
-    pub async fn insert_text(&self, text: &str) -> Result<()> {
+    pub(crate) async fn insert_text(&self, text: &str) -> Result<()> {
         self.send_void(
             "Input.insertText",
             &InputInsertText {
@@ -533,7 +551,7 @@ impl Session {
     }
 
     /// Get the document root node
-    pub async fn get_document(&self, depth: Option<i32>) -> Result<DOMNode> {
+    pub(crate) async fn get_document(&self, depth: Option<i32>) -> Result<DOMNode> {
         let result: DOMGetDocumentResult = self
             .send(
                 "DOM.getDocument",
@@ -547,7 +565,7 @@ impl Session {
     }
 
     /// Query for a single element
-    pub async fn query_selector(&self, node_id: i32, selector: &str) -> Result<i32> {
+    pub(crate) async fn query_selector(&self, node_id: i32, selector: &str) -> Result<i32> {
         let result: DOMQuerySelectorResult = self
             .send(
                 "DOM.querySelector",
@@ -561,7 +579,11 @@ impl Session {
     }
 
     /// Query for all matching elements
-    pub async fn query_selector_all(&self, node_id: i32, selector: &str) -> Result<Vec<i32>> {
+    pub(crate) async fn query_selector_all(
+        &self,
+        node_id: i32,
+        selector: &str,
+    ) -> Result<Vec<i32>> {
         let result: DOMQuerySelectorAllResult = self
             .send(
                 "DOM.querySelectorAll",
@@ -575,7 +597,7 @@ impl Session {
     }
 
     /// Get the box model for an element
-    pub async fn get_box_model(&self, node_id: i32) -> Result<BoxModel> {
+    pub(crate) async fn get_box_model(&self, node_id: i32) -> Result<BoxModel> {
         let result: DOMGetBoxModelResult = self
             .send(
                 "DOM.getBoxModel",
@@ -588,7 +610,7 @@ impl Session {
     }
 
     /// Get outer HTML of an element
-    pub async fn get_outer_html(&self, node_id: i32) -> Result<String> {
+    pub(crate) async fn get_outer_html(&self, node_id: i32) -> Result<String> {
         let result: DOMGetOuterHTMLResult = self
             .send(
                 "DOM.getOuterHTML",
@@ -601,7 +623,7 @@ impl Session {
     }
 
     /// Resolve a DOM node to a Runtime remote object ID
-    pub async fn resolve_node(&self, node_id: i32) -> Result<String> {
+    pub(crate) async fn resolve_node(&self, node_id: i32) -> Result<String> {
         let result: DOMResolveNodeResult = self
             .send(
                 "DOM.resolveNode",
@@ -618,7 +640,7 @@ impl Session {
     }
 
     /// Call a function on a remote object and return the result by value
-    pub async fn call_function_on(
+    pub(crate) async fn call_function_on(
         &self,
         object_id: &str,
         function_declaration: &str,
@@ -628,7 +650,7 @@ impl Session {
     }
 
     /// Focus an element
-    pub async fn focus(&self, node_id: i32) -> Result<()> {
+    pub(crate) async fn focus(&self, node_id: i32) -> Result<()> {
         self.send_void(
             "DOM.focus",
             &DOMFocus {
@@ -639,7 +661,7 @@ impl Session {
     }
 
     /// Get all cookies
-    pub async fn get_cookies(&self, urls: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+    pub(crate) async fn get_cookies(&self, urls: Option<Vec<String>>) -> Result<Vec<Cookie>> {
         let result: NetworkGetCookiesResult = self
             .send("Network.getCookies", &NetworkGetCookies { urls })
             .await?;
@@ -647,7 +669,7 @@ impl Session {
     }
 
     /// Set a cookie
-    pub async fn set_cookie(
+    pub(crate) async fn set_cookie(
         &self,
         name: &str,
         value: &str,
@@ -672,7 +694,7 @@ impl Session {
     }
 
     /// Delete cookies
-    pub async fn delete_cookies(
+    pub(crate) async fn delete_cookies(
         &self,
         name: &str,
         url: Option<&str>,
@@ -692,7 +714,7 @@ impl Session {
 
     /// Enable network events (request/response capture)
     /// NOTE: This enables Network.enable which may be slightly detectable
-    pub async fn network_enable(&self) -> Result<()> {
+    pub(crate) async fn network_enable(&self) -> Result<()> {
         self.send_void(
             "Network.enable",
             &NetworkEnable {
@@ -703,12 +725,12 @@ impl Session {
     }
 
     /// Disable network events
-    pub async fn network_disable(&self) -> Result<()> {
+    pub(crate) async fn network_disable(&self) -> Result<()> {
         self.send_void("Network.disable", &NetworkDisable {}).await
     }
 
     /// Get response body for a request
-    pub async fn get_response_body(&self, request_id: &str) -> Result<(String, bool)> {
+    pub(crate) async fn get_response_body(&self, request_id: &str) -> Result<(String, bool)> {
         let result: NetworkGetResponseBodyResult = self
             .send(
                 "Network.getResponseBody",
@@ -721,7 +743,7 @@ impl Session {
     }
 
     /// Evaluate JavaScript and return a remote object reference (not by value).
-    pub async fn evaluate_for_remote_object(
+    pub(crate) async fn evaluate_for_remote_object(
         &self,
         expression: &str,
     ) -> Result<RuntimeEvaluateResult> {
@@ -730,7 +752,7 @@ impl Session {
     }
 
     /// Convert a remote object ID to a DOM node_id via DOM.requestNode
-    pub async fn request_node(&self, object_id: &str) -> Result<i32> {
+    pub(crate) async fn request_node(&self, object_id: &str) -> Result<i32> {
         let result: DOMRequestNodeResult = self
             .send(
                 "DOM.requestNode",
@@ -743,7 +765,7 @@ impl Session {
     }
 
     /// Get all own properties of a remote object (used for array element enumeration)
-    pub async fn get_properties(
+    pub(crate) async fn get_properties(
         &self,
         object_id: &str,
     ) -> Result<Vec<crate::cdp::types::PropertyDescriptor>> {
@@ -785,13 +807,13 @@ impl Session {
     }
 
     /// Evaluate JavaScript expression and return the result by value
-    pub async fn evaluate(&self, expression: &str) -> Result<RuntimeEvaluateResult> {
+    pub(crate) async fn evaluate(&self, expression: &str) -> Result<RuntimeEvaluateResult> {
         self.evaluate_impl(expression, true, None, true).await
     }
 
     /// Evaluate JavaScript synchronously (don't await promises).
     /// Use this when the page may have unresolved promises that would block.
-    pub async fn evaluate_sync(&self, expression: &str) -> Result<RuntimeEvaluateResult> {
+    pub(crate) async fn evaluate_sync(&self, expression: &str) -> Result<RuntimeEvaluateResult> {
         self.evaluate_impl(expression, true, None, false).await
     }
 
@@ -815,7 +837,11 @@ impl Session {
     }
 
     /// Set files for a file input element
-    pub async fn set_file_input_files(&self, node_id: i32, files: Vec<String>) -> Result<()> {
+    pub(crate) async fn set_file_input_files(
+        &self,
+        node_id: i32,
+        files: Vec<String>,
+    ) -> Result<()> {
         self.send_void(
             "DOM.setFileInputFiles",
             &DOMSetFileInputFiles {
@@ -829,7 +855,10 @@ impl Session {
     }
 
     /// Dispatch a key event with full modifier support
-    pub async fn dispatch_key_event_full(&self, event: InputDispatchKeyEventFull) -> Result<()> {
+    pub(crate) async fn dispatch_key_event_full(
+        &self,
+        event: InputDispatchKeyEventFull,
+    ) -> Result<()> {
         self.send_void("Input.dispatchKeyEvent", &event).await
     }
 }

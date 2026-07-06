@@ -110,50 +110,46 @@ impl NetworkWatcher {
     }
 
     async fn on_request_will_be_sent(&self, event: NetworkRequestWillBeSentEvent) {
-        let request = CapturedRequest {
-            request_id: event.request_id.clone(),
-            url: event.request.url.clone(),
-            method: event.request.method.clone(),
-            headers: event.request.headers.clone(),
-            post_data: event.request.post_data.clone(),
-            resource_type: event.r#type.clone(),
-            status: None,
-            status_text: None,
-            response_headers: None,
-            mime_type: None,
-            timestamp: event.timestamp,
-            complete: false,
-        };
-
-        // Store the request, evicting oldest if at capacity
-        {
+        let request = {
             let mut requests = self.requests.lock().await;
+
+            // Redirects re-fire with the same request_id; keep the original entry.
+            if requests.contains_key(&event.request_id) {
+                tracing::trace!(
+                    "Ignoring redirect requestWillBeSent for {} (keeping original)",
+                    event.request_id
+                );
+                return;
+            }
+
+            // Evict one entry if at capacity (memory safety valve).
             if requests.len() >= MAX_INFLIGHT_REQUESTS {
-                // Evict the entry with the lowest timestamp (oldest request)
-                if let Some(oldest_id) = requests
-                    .iter()
-                    .min_by(|a, b| {
-                        a.1.timestamp
-                            .partial_cmp(&b.1.timestamp)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|(id, _)| id.clone())
-                {
-                    requests.remove(&oldest_id);
-                    tracing::debug!(
-                        "Evicted oldest in-flight request (cap={})",
-                        MAX_INFLIGHT_REQUESTS
-                    );
+                if let Some(id) = requests.keys().next().cloned() {
+                    requests.remove(&id);
+                    tracing::debug!("Evicted a tracked request (cap={})", MAX_INFLIGHT_REQUESTS);
                 }
             }
+
+            let request = CapturedRequest {
+                request_id: event.request_id.clone(),
+                url: event.request.url.clone(),
+                method: event.request.method.clone(),
+                headers: event.request.headers.clone(),
+                post_data: event.request.post_data.clone(),
+                resource_type: event.r#type.clone(),
+                status: None,
+                status_text: None,
+                response_headers: None,
+                mime_type: None,
+                timestamp: event.timestamp,
+                complete: false,
+            };
             requests.insert(event.request_id.clone(), request.clone());
-        }
+            request
+        };
 
         // Send event
-        let _ = self
-            .event_tx
-            .send(NetworkEvent::RequestStarted(request))
-            .await;
+        self.emit(NetworkEvent::RequestStarted(request));
     }
 
     async fn on_response_received(&self, event: NetworkResponseReceivedEvent) {
@@ -169,35 +165,29 @@ impl NetworkWatcher {
         }
 
         // Send event
-        let _ = self
-            .event_tx
-            .send(NetworkEvent::ResponseReceived {
-                request_id: event.request_id,
-                status: event.response.status,
-                status_text: event.response.status_text,
-                headers: event.response.headers,
-                mime_type: event.response.mime_type,
-            })
-            .await;
+        self.emit(NetworkEvent::ResponseReceived {
+            request_id: event.request_id,
+            status: event.response.status,
+            status_text: event.response.status_text,
+            headers: event.response.headers,
+            mime_type: event.response.mime_type,
+        });
     }
 
     async fn on_loading_finished(&self, event: NetworkLoadingFinishedEvent) {
-        // Remove completed request from the in-flight map to prevent unbounded growth.
-        // Consumers already received the full CapturedRequest via RequestStarted and
-        // ResponseReceived events.
+        // Mark complete rather than removing, so get_request() still returns it.
         {
             let mut requests = self.requests.lock().await;
-            requests.remove(&event.request_id);
+            if let Some(req) = requests.get_mut(&event.request_id) {
+                req.complete = true;
+            }
         }
 
         // Send event
-        let _ = self
-            .event_tx
-            .send(NetworkEvent::RequestCompleted {
-                request_id: event.request_id,
-                encoded_data_length: event.encoded_data_length,
-            })
-            .await;
+        self.emit(NetworkEvent::RequestCompleted {
+            request_id: event.request_id,
+            encoded_data_length: event.encoded_data_length,
+        });
     }
 
     async fn on_loading_failed(&self, event: NetworkLoadingFailedEvent) {
@@ -208,14 +198,18 @@ impl NetworkWatcher {
         }
 
         // Send event
-        let _ = self
-            .event_tx
-            .send(NetworkEvent::RequestFailed {
-                request_id: event.request_id,
-                error_text: event.error_text,
-                canceled: event.canceled.unwrap_or(false),
-            })
-            .await;
+        self.emit(NetworkEvent::RequestFailed {
+            request_id: event.request_id,
+            error_text: event.error_text,
+            canceled: event.canceled.unwrap_or(false),
+        });
+    }
+
+    /// Emit an event to consumers without blocking the pump.
+    fn emit(&self, event: NetworkEvent) {
+        if let Err(e) = self.event_tx.try_send(event) {
+            tracing::warn!("Dropping network event (consumer not draining): {}", e);
+        }
     }
 
     /// Receive the next network event
@@ -226,7 +220,11 @@ impl NetworkWatcher {
 
     /// Try to receive a network event without blocking
     pub async fn try_recv(&self) -> Option<NetworkEvent> {
-        let mut rx = self.event_rx.lock().await;
+        // Use try_lock so a concurrent recv() doesn't block us.
+        let mut rx = match self.event_rx.try_lock() {
+            Ok(rx) => rx,
+            Err(_) => return None,
+        };
         rx.try_recv().ok()
     }
 
@@ -263,5 +261,159 @@ mod tests {
     async fn test_network_watcher_creation() {
         let watcher = NetworkWatcher::new();
         assert!(watcher.get_all_requests().await.is_empty());
+    }
+
+    fn event(method: &str, params: serde_json::Value) -> CdpMessage {
+        CdpMessage::Event {
+            method: method.to_string(),
+            params,
+            session_id: None,
+        }
+    }
+
+    fn request_will_be_sent(id: &str, url: &str) -> CdpMessage {
+        event(
+            "Network.requestWillBeSent",
+            serde_json::json!({
+                "requestId": id,
+                "request": {
+                    "url": url,
+                    "method": "GET",
+                    "headers": {},
+                },
+                "timestamp": 1.0,
+                "type": "Document",
+            }),
+        )
+    }
+
+    /// Regression: a completed request (finished loading) must be retained so
+    /// `get_request` still returns it with `complete == true` and the response
+    /// status populated. Previously loadingFinished removed the entry.
+    #[tokio::test]
+    async fn test_completed_request_is_retained() {
+        let watcher = NetworkWatcher::new();
+        let id = "req-1";
+
+        assert!(
+            watcher
+                .process_event(&request_will_be_sent(id, "https://example.com/"))
+                .await
+        );
+        assert!(
+            watcher
+                .process_event(&event(
+                    "Network.responseReceived",
+                    serde_json::json!({
+                        "requestId": id,
+                        "response": {
+                            "url": "https://example.com/",
+                            "status": 200,
+                            "statusText": "OK",
+                            "headers": {},
+                            "mimeType": "text/html",
+                        },
+                    }),
+                ))
+                .await
+        );
+        assert!(
+            watcher
+                .process_event(&event(
+                    "Network.loadingFinished",
+                    serde_json::json!({
+                        "requestId": id,
+                        "timestamp": 2.0,
+                        "encodedDataLength": 1234,
+                    }),
+                ))
+                .await
+        );
+
+        let req = watcher.get_request(id).await.expect("request retained");
+        assert!(req.complete);
+        assert_eq!(req.status, Some(200));
+        assert_eq!(req.status_text.as_deref(), Some("OK"));
+    }
+
+    /// Regression: a redirect re-fires requestWillBeSent with the same
+    /// request_id. The original entry (first URL) must be kept and there must
+    /// be exactly one stored entry.
+    #[tokio::test]
+    async fn test_redirect_keeps_original_entry() {
+        let watcher = NetworkWatcher::new();
+        let id = "req-redirect";
+
+        assert!(
+            watcher
+                .process_event(&request_will_be_sent(id, "https://first.example/"))
+                .await
+        );
+        assert!(
+            watcher
+                .process_event(&request_will_be_sent(id, "https://second.example/"))
+                .await
+        );
+
+        let req = watcher.get_request(id).await.expect("request present");
+        assert_eq!(req.url, "https://first.example/");
+        assert_eq!(watcher.get_all_requests().await.len(), 1);
+    }
+
+    /// A failed request (loadingFailed) must be removed from the store.
+    #[tokio::test]
+    async fn test_loading_failed_removes_entry() {
+        let watcher = NetworkWatcher::new();
+        let id = "req-fail";
+
+        assert!(
+            watcher
+                .process_event(&request_will_be_sent(id, "https://example.com/"))
+                .await
+        );
+        assert!(watcher.get_request(id).await.is_some());
+
+        assert!(
+            watcher
+                .process_event(&event(
+                    "Network.loadingFailed",
+                    serde_json::json!({
+                        "requestId": id,
+                        "errorText": "net::ERR_FAILED",
+                        "canceled": false,
+                    }),
+                ))
+                .await
+        );
+
+        assert!(watcher.get_request(id).await.is_none());
+    }
+
+    /// Regression: the pump must not block when events are never drained.
+    /// Feeding well over the channel capacity without ever calling `recv()`
+    /// should complete (proving `emit` uses non-blocking `try_send`) and the
+    /// store should reflect every request.
+    #[tokio::test]
+    async fn test_pump_does_not_block_when_events_not_drained() {
+        let watcher = NetworkWatcher::new();
+        const N: usize = 300;
+
+        for i in 0..N {
+            let id = format!("req-{i}");
+            let url = format!("https://example.com/{i}");
+            assert!(
+                watcher
+                    .process_event(&request_will_be_sent(&id, &url))
+                    .await
+            );
+        }
+
+        // Reaching here without hanging proves the pump never blocked.
+        assert_eq!(watcher.get_all_requests().await.len(), N);
+        assert!(watcher.get_request("req-0").await.is_some());
+        assert!(watcher
+            .get_request(&format!("req-{}", N - 1))
+            .await
+            .is_some());
     }
 }

@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-07-06
+
+### Fixed
+
+#### Transport
+- Reassemble fragmented WebSocket frames (previously dropped, hanging the request)
+- A mid-frame read timeout is now fatal instead of silently desyncing the stream
+- Kill and reap Chrome on failed launch/handshake and DevTools-URL timeout so a partial launch can't orphan a process
+- `Error` Display now surfaces the underlying io cause
+
+#### Stealth
+- A single `Fingerprint` now drives the UA, `Sec-CH-UA*` client-hint metadata, `navigator.platform`, WebGL and the injected script — previously hardcoded values contradicted the UA (e.g. `MacIntel` on a Windows UA)
+- Added `Function.prototype.toString` native masking; stable `navigator.plugins` reference; deterministic canvas/audio noise
+- Removed the `__eoka_pending_requests` page beacon and the page-breaking `Image` naturalHeight hack
+
+#### Binary patcher
+- Resolve the real ELF next to a channel wrapper — **fixes Chrome Beta/Dev, which `find_chrome` could not locate at all**
+- Stable content-addressed cache (no ~400MB re-copy/re-patch per launch); verification excludes non-rewritten patterns
+
+#### Cookies
+- Percent-encode CR/LF and sanitize cookie names (closes a header-injection hole)
+- Host-only cookies no longer leak to subdomains (RFC 6265)
+
+#### Page / network capture
+- Cache the document node so `find()` no longer invalidates previously-returned element handles
+- `goto` waits for load; `wait_for_hidden` handles `display:none`; `\0` escapes as `\x00`
+- Retain completed requests, keep the original entry across redirects, non-blocking event emit, O(1) eviction
+
+### Added
+- `Session::set_user_agent_full` with client-hint metadata
+- `BoxModel::try_center` (fallible center)
+- 44 regression/unit tests
+
+### Changed
+
+#### Behavior
+- `Element::center` now errors (`ElementNotVisible`) instead of returning `(0.0, 0.0)` and clicking the viewport corner
+
+#### Deprecated
+- `BoxModel::center` — use `try_center`
+
+---
+
 ## [0.2.1] - 2025-01-26
 
 ### Fixed

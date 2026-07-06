@@ -103,8 +103,11 @@ fn bezier_curve(start: Point, end: Point, num_points: usize) -> Vec<Point> {
         let mt2 = mt * mt;
         let mt3 = mt2 * mt;
 
-        let x = mt3 * start.0 + 3.0 * mt2 * t * cp1.0 + 3.0 * mt * t2 * cp2.0 + t3 * end.0;
-        let y = mt3 * start.1 + 3.0 * mt2 * t * cp1.1 + 3.0 * mt * t2 * cp2.1 + t3 * end.1;
+        // Clamp to >= 0 so we never dispatch a negative mouse position.
+        let x =
+            (mt3 * start.0 + 3.0 * mt2 * t * cp1.0 + 3.0 * mt * t2 * cp2.0 + t3 * end.0).max(0.0);
+        let y =
+            (mt3 * start.1 + 3.0 * mt2 * t * cp1.1 + 3.0 * mt * t2 * cp2.1 + t3 * end.1).max(0.0);
 
         points.push((x, y));
     }
@@ -325,6 +328,25 @@ mod tests {
         let last = points.last().unwrap();
         assert!((last.0 - end.0).abs() < 0.001);
         assert!((last.1 - end.1).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_bezier_curve_clamps_to_nonnegative() {
+        // Target very near the origin: the randomized control points can push
+        // the raw cubic below zero, so every emitted point must be clamped to
+        // >= 0 (and stay finite). Run many iterations since control points and
+        // start offsets are randomized.
+        for _ in 0..500 {
+            let start = (0.0, 0.0);
+            let end = (2.0, 2.0);
+            let points = bezier_curve(start, end, 25);
+            for (x, y) in points {
+                assert!(x >= 0.0, "x should be clamped to >= 0, got {x}");
+                assert!(y >= 0.0, "y should be clamped to >= 0, got {y}");
+                assert!(x.is_finite(), "x should be finite, got {x}");
+                assert!(y.is_finite(), "y should be finite, got {y}");
+            }
+        }
     }
 
     #[test]

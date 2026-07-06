@@ -1,7 +1,8 @@
 [package]
 name = "eoka"
-version = "0.3.15"
+version = "0.4.0"
 edition = "2021"
+rust-version = "1.74"
 license = "MIT"
 description = "Stealth browser automation for Rust. Puppeteer/Playwright alternative with anti-bot bypass."
 keywords = ["puppeteer", "playwright", "headless", "selenium", "web-scraping"]
@@ -11,6 +12,9 @@ homepage = "https://github.com/cbxss/eoka"
 documentation = "https://docs.rs/eoka"
 readme = "README.md"
 authors = ["cbxss"]
+# Keep the published package lean: CI config and any example-generated
+# screenshots don't belong in the crate tarball.
+exclude = ["/.github", "*.png", "*.jpg", "*.jpeg"]
 
 [dependencies]
 # Async runtime (minimal features — no net/io-util/macros/rt-multi-thread)
@@ -38,29 +42,6 @@ base64 = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[[example]]
-name = "basic"
-path = "examples/basic.rs"
-
-[[example]]
-name = "detection_test"
-path = "examples/detection_test.rs"
-
-[[example]]
-name = "rebrowser_test"
-path = "examples/rebrowser_test.rs"
-
-[[example]]
-name = "request_capture"
-path = "examples/request_capture.rs"
-
-[[example]]
-name = "smoke"
-path = "examples/smoke.rs"
-
-[[example]]
-name = "connect_existing"
-path = "examples/connect_existing.rs"
+# Examples are auto-discovered from examples/*.rs — no explicit [[example]] tables needed.

@@ -13,7 +13,7 @@ pub enum Error {
     Launch(String),
 
     /// Transport error
-    #[error("Transport error: {context}")]
+    #[error(fmt = transport_fmt)]
     Transport {
         context: String,
         #[source]
@@ -73,6 +73,18 @@ pub enum Error {
     RetryExhausted { attempts: u32, last_error: String },
 }
 
+/// Display for the `Transport` variant, including the io error cause when present.
+fn transport_fmt(
+    context: &str,
+    source: &Option<std::io::Error>,
+    f: &mut std::fmt::Formatter<'_>,
+) -> std::fmt::Result {
+    match source {
+        Some(err) => write!(f, "Transport error: {}: {}", context, err),
+        None => write!(f, "Transport error: {}", context),
+    }
+}
+
 impl Error {
     /// Create a transport error with context
     pub fn transport(context: impl Into<String>) -> Self {
@@ -105,5 +117,47 @@ impl Error {
             operation: operation.into(),
             message: message.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as StdError;
+
+    #[test]
+    fn test_transport_io_display_includes_context_and_cause() {
+        let err = Error::transport_io(
+            "Failed to connect",
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "boom"),
+        );
+        let msg = format!("{}", err);
+        // Both the context and the underlying io cause must appear.
+        assert!(
+            msg.contains("Failed to connect"),
+            "missing context in: {msg}"
+        );
+        assert!(msg.contains("boom"), "missing io cause in: {msg}");
+    }
+
+    #[test]
+    fn test_transport_io_exposes_source() {
+        let err = Error::transport_io(
+            "Failed to connect",
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "boom"),
+        );
+        assert!(
+            err.source().is_some(),
+            "transport_io error should expose its io source"
+        );
+    }
+
+    #[test]
+    fn test_transport_display_plain_message() {
+        let err = Error::transport("plain msg");
+        let msg = format!("{}", err);
+        assert!(msg.contains("plain msg"), "missing message in: {msg}");
+        // No source for the context-only constructor.
+        assert!(err.source().is_none());
     }
 }

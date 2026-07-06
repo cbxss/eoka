@@ -85,9 +85,13 @@ impl BrowserSession {
         self.cookies
             .iter()
             .filter(|c| {
-                let cookie_domain = c.domain.trim_start_matches('.');
-                // Exact match or subdomain match with dot boundary
-                domain == cookie_domain || domain.ends_with(&format!(".{}", cookie_domain))
+                if let Some(base) = c.domain.strip_prefix('.') {
+                    // Domain cookie: matches the domain and its subdomains.
+                    domain == base || domain.ends_with(&format!(".{}", base))
+                } else {
+                    // Host-only cookie: matches only the exact host.
+                    domain == c.domain
+                }
             })
             .collect()
     }
@@ -97,18 +101,57 @@ impl BrowserSession {
         self.cookies
             .iter()
             .map(|c| {
-                // RFC 6265 §4.1.1: cookie-value must not contain semicolons,
-                // commas, or whitespace. Percent-encode problematic chars.
-                let safe_value = c
-                    .value
-                    .replace('%', "%25")
-                    .replace(';', "%3B")
-                    .replace(',', "%2C")
-                    .replace(' ', "%20");
-                format!("{}={}", c.name, safe_value)
+                format!(
+                    "{}={}",
+                    Self::sanitize_cookie_name(&c.name),
+                    Self::escape_cookie_value(&c.value)
+                )
             })
             .collect::<Vec<_>>()
             .join("; ")
+    }
+
+    /// Percent-encode characters illegal in an RFC 6265 cookie-value.
+    fn escape_cookie_value(value: &str) -> String {
+        value
+            .replace('%', "%25")
+            .replace(';', "%3B")
+            .replace(',', "%2C")
+            .replace(' ', "%20")
+            .replace('\r', "%0D")
+            .replace('\n', "%0A")
+    }
+
+    /// Percent-encode any byte not valid in an RFC 6265 cookie-name.
+    fn sanitize_cookie_name(name: &str) -> String {
+        let mut out = String::with_capacity(name.len());
+        for b in name.bytes() {
+            let is_separator = matches!(
+                b,
+                b'(' | b')'
+                    | b'<'
+                    | b'>'
+                    | b'@'
+                    | b','
+                    | b';'
+                    | b':'
+                    | b'\\'
+                    | b'"'
+                    | b'/'
+                    | b'['
+                    | b']'
+                    | b'?'
+                    | b'='
+                    | b'{'
+                    | b'}'
+            );
+            if b > 0x20 && b < 0x7f && !is_separator {
+                out.push(b as char);
+            } else {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+        out
     }
 }
 
@@ -190,13 +233,13 @@ mod tests {
             extra_headers: HashMap::new(),
         };
 
-        // Exact match
+        // Exact host match
         let example_cookies = session.cookies_for_domain("example.com");
         assert_eq!(example_cookies.len(), 2); // "example.com" + ".example.com"
 
-        // Subdomain match
+        // Subdomain: only the domain cookie ".example.com" matches
         let sub_cookies = session.cookies_for_domain("sub.example.com");
-        assert_eq!(sub_cookies.len(), 2); // "example.com" + ".example.com"
+        assert_eq!(sub_cookies.len(), 1); // only ".example.com"
 
         // Must NOT match "badexample.com" (no dot boundary)
         let bad_cookies = session.cookies_for_domain("badexample.com");
@@ -227,5 +270,135 @@ mod tests {
         let header = session.cookie_header();
         assert!(!header.contains(';'));
         assert!(header.contains("tok=val%3Bue%20with%20spaces"));
+    }
+
+    /// Build a single-cookie session for header-encoding tests.
+    fn single_cookie(name: &str, value: &str) -> BrowserSession {
+        BrowserSession {
+            cookies: vec![SessionCookie {
+                name: name.to_string(),
+                value: value.to_string(),
+                domain: "x.com".to_string(),
+                path: "/".to_string(),
+                secure: false,
+                http_only: false,
+                same_site: None,
+                expires: None,
+            }],
+            user_agent: String::new(),
+            url: String::new(),
+            extra_headers: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_cookie_header_no_crlf_injection() {
+        // A value carrying a CRLF header-injection payload must be neutralized:
+        // no raw CR or LF may survive into the header string.
+        let session = single_cookie("sid", "x\r\nX-Injected: 1");
+        let header = session.cookie_header();
+        assert!(!header.contains('\r'), "raw CR leaked: {:?}", header);
+        assert!(!header.contains('\n'), "raw LF leaked: {:?}", header);
+        // CR and LF are percent-encoded.
+        assert!(header.contains("%0D"));
+        assert!(header.contains("%0A"));
+        assert_eq!(header, "sid=x%0D%0AX-Injected:%201");
+    }
+
+    #[test]
+    fn test_cookie_header_value_special_chars_encoded() {
+        // ';', ',', space and '%' are all percent-encoded.
+        let session = single_cookie("k", "a;b,c d");
+        let header = session.cookie_header();
+        assert_eq!(header, "k=a%3Bb%2Cc%20d");
+        assert!(!header.contains(';'));
+        assert!(!header.contains(','));
+        assert!(!header.contains(' '));
+    }
+
+    #[test]
+    fn test_cookie_header_percent_first_no_double_encode() {
+        // '%' must be escaped first so a literal '%' becomes exactly %25 and
+        // existing percent sequences in the value are not re-interpreted.
+        let session = single_cookie("k", "100%");
+        let header = session.cookie_header();
+        assert_eq!(header, "k=100%25");
+
+        // A literal "%3B" in the value must not be mistaken for an encoded ';'.
+        let session = single_cookie("k", "%3B");
+        let header = session.cookie_header();
+        assert_eq!(header, "k=%253B");
+    }
+
+    #[test]
+    fn test_cookie_header_name_sanitized() {
+        // Control chars, spaces and separators in the NAME must be
+        // percent-encoded so they cannot appear unescaped in the header.
+        let session = single_cookie("a b;c=d\ne", "1");
+        let header = session.cookie_header();
+        // The value part is trivially "1"; inspect the name portion.
+        let name = header.strip_suffix("=1").expect("header ends with =1");
+        assert!(!name.contains(' '), "raw space in name: {:?}", name);
+        assert!(!name.contains(';'), "raw ; in name: {:?}", name);
+        assert!(!name.contains('\n'), "raw LF in name: {:?}", name);
+        // The '=' that is part of the cookie name must be escaped (%3D), so
+        // there is exactly one unescaped '=' separator in the whole header.
+        assert_eq!(header.matches('=').count(), 1);
+        assert_eq!(name, "a%20b%3Bc%3Dd%0Ae");
+    }
+
+    #[test]
+    fn test_cookies_for_domain_host_only_vs_domain() {
+        let session = BrowserSession {
+            cookies: vec![
+                // Host-only cookie: stored domain has no leading dot.
+                SessionCookie {
+                    name: "host".to_string(),
+                    value: "1".to_string(),
+                    domain: "example.com".to_string(),
+                    path: "/".to_string(),
+                    secure: false,
+                    http_only: false,
+                    same_site: None,
+                    expires: None,
+                },
+                // Domain cookie: stored domain has a leading dot.
+                SessionCookie {
+                    name: "dom".to_string(),
+                    value: "2".to_string(),
+                    domain: ".example.com".to_string(),
+                    path: "/".to_string(),
+                    secure: false,
+                    http_only: false,
+                    same_site: None,
+                    expires: None,
+                },
+            ],
+            user_agent: String::new(),
+            url: String::new(),
+            extra_headers: HashMap::new(),
+        };
+
+        let names = |domain: &str| -> Vec<String> {
+            session
+                .cookies_for_domain(domain)
+                .iter()
+                .map(|c| c.name.clone())
+                .collect()
+        };
+
+        // Exact host: both host-only and domain cookie match.
+        let exact = names("example.com");
+        assert!(exact.contains(&"host".to_string()));
+        assert!(exact.contains(&"dom".to_string()));
+        assert_eq!(exact.len(), 2);
+
+        // Subdomain: only the domain cookie matches (host-only does NOT).
+        let sub = names("sub.example.com");
+        assert_eq!(sub, vec!["dom".to_string()]);
+
+        // Suffix that is not a dot-boundary subdomain matches neither.
+        let bad = names("badexample.com");
+        assert!(bad.is_empty());
     }
 }

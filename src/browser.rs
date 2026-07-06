@@ -81,8 +81,11 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
 /// Info about an open tab
 #[derive(Debug, Clone)]
 pub struct TabInfo {
+    /// Target ID of the tab.
     pub id: String,
+    /// Tab title.
     pub title: String,
+    /// URL currently loaded in the tab.
     pub url: String,
 }
 

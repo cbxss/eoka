@@ -11,13 +11,21 @@ use crate::error::Result;
 /// Browser cookie (simplified, serializable)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCookie {
+    /// Cookie name.
     pub name: String,
+    /// Cookie value.
     pub value: String,
+    /// Domain the cookie applies to.
     pub domain: String,
+    /// Path the cookie applies to.
     pub path: String,
+    /// Whether the cookie is sent only over HTTPS.
     pub secure: bool,
+    /// Whether the cookie is inaccessible to JavaScript.
     pub http_only: bool,
+    /// SameSite policy ("Strict", "Lax", "None"), if set.
     pub same_site: Option<String>,
+    /// Expiry as a Unix timestamp in seconds, or `None` for a session cookie.
     pub expires: Option<f64>,
 }
 

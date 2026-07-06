@@ -10,7 +10,7 @@
 //!
 //! - **Stealth by Default** - Binary patching, 15 JS evasions, human-like mouse/typing
 //! - **Puppeteer-like API** - `click()`, `type()`, `wait_for()`, `screenshot()`, etc.
-//! - **Minimal Dependencies** - ~10 crates total, no chromiumoxide bloat
+//! - **Minimal Dependencies** - 11 direct crates, no chromiumoxide/puppeteer-extra bloat
 //! - **AI-Agent Ready** - PageState introspection, element indexing, text extraction
 //! - **Fast** - Lazy evasion scripts, mmap patching, stack-allocated paths
 //!
@@ -59,6 +59,8 @@
 //! # Ok(())
 //! # }
 //! ```
+
+#![deny(missing_docs)]
 
 pub mod browser;
 pub mod cdp;

@@ -8,13 +8,18 @@ use crate::page::{escape_js_string, sleep_ms, Page, INTERACTION_DELAY_MS};
 /// Bounding box of an element
 #[derive(Debug, Clone, Copy)]
 pub struct BoundingBox {
+    /// X coordinate of the top-left corner, in CSS pixels.
     pub x: f64,
+    /// Y coordinate of the top-left corner, in CSS pixels.
     pub y: f64,
+    /// Width in CSS pixels.
     pub width: f64,
+    /// Height in CSS pixels.
     pub height: f64,
 }
 
 impl BoundingBox {
+    /// Center point of the box as `(x, y)`.
     pub fn center(&self) -> (f64, f64) {
         (self.x + self.width / 2.0, self.y + self.height / 2.0)
     }

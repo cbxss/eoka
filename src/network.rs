@@ -21,21 +21,31 @@ pub enum NetworkEvent {
     RequestStarted(CapturedRequest),
     /// Response headers received
     ResponseReceived {
+        /// ID of the request this response belongs to.
         request_id: String,
+        /// HTTP status code.
         status: i32,
+        /// HTTP status text.
         status_text: String,
+        /// Response headers.
         headers: HashMap<String, String>,
+        /// Response MIME type, if known.
         mime_type: Option<String>,
     },
     /// Request completed successfully
     RequestCompleted {
+        /// ID of the completed request.
         request_id: String,
+        /// Total bytes received over the wire.
         encoded_data_length: i64,
     },
     /// Request failed
     RequestFailed {
+        /// ID of the failed request.
         request_id: String,
+        /// Failure reason.
         error_text: String,
+        /// Whether the request was canceled.
         canceled: bool,
     },
 }

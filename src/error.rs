@@ -18,7 +18,9 @@ pub enum Error {
     /// Transport error
     #[error(fmt = transport_fmt)]
     Transport {
+        /// Description of what failed.
         context: String,
+        /// Underlying IO error, if any.
         #[source]
         source: Option<std::io::Error>,
     },
@@ -27,8 +29,11 @@ pub enum Error {
     /// came from a command response, and are `None` for context-free failures.
     #[error(fmt = cdp_fmt)]
     Cdp {
+        /// CDP command method that failed, if known.
         method: Option<String>,
+        /// CDP error code, if known.
         code: Option<i64>,
+        /// Error message.
         message: String,
     },
 
@@ -42,7 +47,10 @@ pub enum Error {
 
     /// Element exists in DOM but is not visible/rendered
     #[error("Element not visible: '{selector}' exists in DOM but is not rendered (hidden, display:none, or off-screen)")]
-    ElementNotVisible { selector: String },
+    ElementNotVisible {
+        /// Selector that matched the hidden element.
+        selector: String,
+    },
 
     /// Timeout
     #[error("Timeout: {0}")]
@@ -66,11 +74,21 @@ pub enum Error {
 
     /// Binary patching error
     #[error("Patching error in {operation}: {message}")]
-    Patching { operation: String, message: String },
+    Patching {
+        /// Patching operation that failed.
+        operation: String,
+        /// Error message.
+        message: String,
+    },
 
     /// Retry exhausted
     #[error("Retry exhausted after {attempts} attempts: {last_error}")]
-    RetryExhausted { attempts: u32, last_error: String },
+    RetryExhausted {
+        /// Number of attempts made before giving up.
+        attempts: u32,
+        /// The last error encountered.
+        last_error: String,
+    },
 }
 
 // `std::io::Error` and `serde_json::Error` aren't `Clone`, so we can't derive it.

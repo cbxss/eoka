@@ -94,13 +94,20 @@ pub struct Transport {
 /// A parsed CDP message (response or event)
 #[derive(Debug, Clone)]
 pub enum CdpMessage {
+    /// Response to a previously issued command.
     Response {
+        /// Command ID this response corresponds to.
         id: u64,
+        /// Command result, or the CDP error it returned.
         result: Result<Value>,
     },
+    /// An event emitted by Chrome.
     Event {
+        /// Event method name (e.g. "Network.requestWillBeSent").
         method: String,
+        /// Event payload.
         params: Value,
+        /// Session ID the event originated from, if any.
         session_id: Option<String>,
     },
 }

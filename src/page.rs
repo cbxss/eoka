@@ -1304,24 +1304,38 @@ impl Page {
 /// A captured HTTP request with its response
 #[derive(Debug, Clone)]
 pub struct CapturedRequest {
+    /// CDP request ID (use with `get_response_body`).
     pub request_id: String,
+    /// Request URL.
     pub url: String,
+    /// HTTP method.
     pub method: String,
+    /// Request headers.
     pub headers: HashMap<String, String>,
+    /// Request body, if present.
     pub post_data: Option<String>,
+    /// Resource type (e.g. "Document", "XHR", "Script").
     pub resource_type: Option<String>,
+    /// Response status code, once received.
     pub status: Option<i32>,
+    /// Response status text, once received.
     pub status_text: Option<String>,
+    /// Response headers, once received.
     pub response_headers: Option<HashMap<String, String>>,
+    /// Response MIME type, once received.
     pub mime_type: Option<String>,
+    /// Time the request was initiated (CDP monotonic timestamp).
     pub timestamp: f64,
+    /// Whether the response has finished loading.
     pub complete: bool,
 }
 
 /// Response body - either text or binary
 #[derive(Debug)]
 pub enum ResponseBody {
+    /// Textual response body.
     Text(String),
+    /// Binary response body.
     Binary(Vec<u8>),
 }
 
@@ -1357,11 +1371,17 @@ pub struct FrameInfo {
 /// Debug information about page state
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PageState {
+    /// Current page URL.
     pub url: String,
+    /// Current page title.
     pub title: String,
+    /// Number of `<input>` elements.
     pub input_count: u32,
+    /// Number of `<button>` elements.
     pub button_count: u32,
+    /// Number of `<a>` link elements.
     pub link_count: u32,
+    /// Number of `<form>` elements.
     pub form_count: u32,
 }
 

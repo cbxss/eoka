@@ -2,6 +2,58 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-07-06
+
+A refactor release: smaller, more reusable public API and a modern async
+transport. See the migration notes below.
+
+### Changed
+
+#### Breaking
+
+- **`Element` is now owned, not borrowed.** `Element<'a>` → `Element`; it holds a
+  cheap clone of its `Page`, so elements are `Send + 'static` — you can store
+  them, return them, and use them across `.await`/navigation. `Page` and
+  `Session` gained `Clone`.
+- **CDP internals are no longer public API.** The ~90 hand-written `cdp::types`
+  structs and the typed `Session`/`Connection` methods are now `pub(crate)`, so
+  adding a CDP field is no longer a breaking change. The deliberate low-level
+  escape hatch remains public: `Session::{session_id, target_id, transport,
+  send}`, `Connection::transport`, `Transport`, and `cdp::discover::*`.
+- **Cookies use the domain `SessionCookie`.** `Page::cookies() ->
+  Vec<SessionCookie>`, `Page::set_cookies_bulk(Vec<SessionCookie>)`, and
+  `BrowserSession::new(Vec<SessionCookie>)` (previously exposed the internal cdp
+  `Cookie`/`NetworkSetCookie`).
+- **Transport constructors are `async`** (`Transport::new`/`new_with_options`/
+  `connect`/`connect_with_options`) — the WebSocket connect is awaited.
+- **`Error` changes:** `Error::CdpSimple(String)` removed; `Error::Cdp` now has
+  `method: Option<String>` and `code: Option<i64>` (use `Error::cdp(...)` or the
+  new `Error::cdp_msg(...)`). `Error` is `#[non_exhaustive]` — match with a `_`
+  arm. `Error` now implements `Clone`.
+- Removed the unused `full_evasion_script` public function.
+
+#### Transport rewrite
+
+- The hand-rolled RFC-6455 WebSocket layer was replaced with
+  `tokio-tungstenite` (no TLS); the blocking `std::thread` reader is now an
+  async task. Events moved from a lossy 256-slot `mpsc` to a multi-consumer
+  `tokio::sync::broadcast` (new `Transport::subscribe()`); `recv_event` no
+  longer silently drops events. `transport.rs` shrank 843 → 597 lines.
+  New deps: `tokio-tungstenite`, `futures-util` (tokio `net`/`io-util`/`rt`).
+
+### Fixed
+
+- **`find_chrome` now locates non-stable Chrome channels** (Beta/Dev): it
+  resolves the real ELF sibling of a channel wrapper script, instead of only
+  hardcoding the stable `/opt/google/chrome` path.
+- `find_by_text`/`find_all_by_text` prime `DOM.getDocument` before
+  `DOM.requestNode` (previously returned 0 on an unpopulated node-id space).
+
+### Internal
+
+- Split `page.rs` (1815 lines) into `page.rs` + `element.rs` + `keyboard.rs`.
+- Every public item is now documented (`#![deny(missing_docs)]`).
+
 ## [0.4.0] - 2026-07-06
 
 ### Fixed

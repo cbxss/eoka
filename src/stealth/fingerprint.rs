@@ -108,7 +108,9 @@ pub fn random_user_agent() -> String {
 /// Browser fingerprint data — a single coherent identity.
 #[derive(Debug, Clone)]
 pub struct Fingerprint {
+    /// Full User-Agent string.
     pub user_agent: String,
+    /// Operating system platform.
     pub platform: Platform,
     /// Chrome major version, e.g. "140" (drives `Sec-CH-UA` brand versions).
     pub chrome_major: String,
@@ -116,20 +118,32 @@ pub struct Fingerprint {
     pub chrome_full_version: String,
     /// Client-hint OS version, e.g. "15.0.0".
     pub platform_version: String,
+    /// Screen width in pixels.
     pub screen_width: u32,
+    /// Screen height in pixels.
     pub screen_height: u32,
+    /// Screen color depth in bits.
     pub color_depth: u8,
+    /// `navigator.hardwareConcurrency` (logical CPU count).
     pub hardware_concurrency: u8,
+    /// `navigator.deviceMemory` in gigabytes.
     pub device_memory: u8,
+    /// IANA timezone name.
     pub timezone: String,
+    /// `navigator.languages` list.
     pub languages: Vec<String>,
+    /// Spoofed WebGL unmasked vendor.
     pub webgl_vendor: String,
+    /// Spoofed WebGL unmasked renderer.
     pub webgl_renderer: String,
 }
 
+/// Operating system platform for a fingerprint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
+    /// macOS.
     MacOS,
+    /// Windows.
     Windows,
 }
 

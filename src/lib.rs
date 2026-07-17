@@ -43,19 +43,19 @@
 //! ## Configuration
 //!
 //! ```rust,no_run
-//! use eoka::{Browser, StealthConfig};
+//! use eoka::Browser;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> eoka::Result<()> {
-//! let config = StealthConfig {
-//!     headless: true,
-//!     patch_binary: true,
-//!     webgl_spoof: true,
-//!     canvas_spoof: true,
-//!     ..Default::default()
-//! };
+//! // The default launch path is stealthy and headless.
+//! let browser = Browser::launch().await?;
+//! browser.close().await?;
 //!
-//! let browser = Browser::launch_with_config(config).await?;
+//! // For one-off tweaks, mutate the default stealth config inline.
+//! let browser = Browser::launch_with(|config| {
+//!     config.proxy = Some("http://127.0.0.1:8080".into());
+//! }).await?;
+//! browser.close().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -66,7 +66,7 @@ pub mod browser;
 pub mod cdp;
 pub mod element;
 pub mod error;
-pub mod keyboard;
+mod keyboard;
 pub mod network;
 pub mod page;
 pub mod session;
@@ -222,5 +222,21 @@ impl StealthConfig {
             human_typing: true,
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StealthConfig;
+
+    #[test]
+    fn default_config_is_headless() {
+        assert!(StealthConfig::default().headless);
+    }
+
+    #[test]
+    fn visible_configs_are_explicitly_not_headless() {
+        assert!(!StealthConfig::visible().headless);
+        assert!(!StealthConfig::debug().headless);
     }
 }

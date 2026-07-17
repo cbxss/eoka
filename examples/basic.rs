@@ -1,8 +1,9 @@
 //! Basic usage example for eoka
 //!
 //! Run with: cargo run --example basic
+//! Or visible: cargo run --example basic -- --visible
 
-use eoka::{Browser, Result, StealthConfig};
+use eoka::{Browser, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -11,14 +12,15 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    // Launch browser with visible window for demo
-    let config = StealthConfig {
-        headless: false, // Show the browser
-        ..Default::default()
-    };
+    let visible = std::env::args().any(|a| a == "--visible");
 
+    println!("Mode: {}", if visible { "visible" } else { "headless" });
     println!("Launching browser...");
-    let browser = Browser::launch_with_config(config).await?;
+    let browser = if visible {
+        Browser::launch_visible().await?
+    } else {
+        Browser::launch().await?
+    };
 
     // Get browser version
     let version = browser.version().await?;

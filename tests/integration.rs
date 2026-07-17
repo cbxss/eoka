@@ -3,7 +3,7 @@
 //! These tests require Chrome to be installed and available.
 //! Run with: cargo test --test integration -- --ignored
 
-use eoka::{Browser, StealthConfig};
+use eoka::Browser;
 
 /// Check if Chrome is available
 fn chrome_available() -> bool {
@@ -30,8 +30,7 @@ async fn test_browser_launch_visible() {
         return;
     }
 
-    let config = StealthConfig::visible();
-    let browser = Browser::launch_with_config(config)
+    let browser = Browser::launch_visible()
         .await
         .expect("Failed to launch browser");
     browser.close().await.expect("Failed to close browser");

@@ -137,6 +137,26 @@ impl Browser {
         Self::launch_with_config(StealthConfig::default()).await
     }
 
+    /// Launch a new stealth browser with a visible window.
+    pub async fn launch_visible() -> Result<Self> {
+        Self::launch_with_config(StealthConfig::visible()).await
+    }
+
+    /// Launch a new visible stealth browser with debug logging behavior enabled.
+    pub async fn launch_debug() -> Result<Self> {
+        Self::launch_with_config(StealthConfig::debug()).await
+    }
+
+    /// Launch with the default stealth config after applying inline changes.
+    ///
+    /// This avoids constructing a full [`StealthConfig`] when only one or two
+    /// options need to change.
+    pub async fn launch_with(configure: impl FnOnce(&mut StealthConfig)) -> Result<Self> {
+        let mut config = StealthConfig::default();
+        configure(&mut config);
+        Self::launch_with_config(config).await
+    }
+
     /// Launch with custom config
     pub async fn launch_with_config(config: StealthConfig) -> Result<Self> {
         let config = Arc::new(config);

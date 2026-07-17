@@ -42,11 +42,11 @@ async fn main() -> Result<()> {
 ## Login Flow Example
 
 ```rust
-use eoka::{Browser, Result, StealthConfig};
+use eoka::{Browser, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let browser = Browser::launch_with_config(StealthConfig::visible()).await?;
+    let browser = Browser::launch().await?;
     let page = browser.new_page("https://example.com/login").await?;
 
     page.try_click_by_text("Accept Cookies").await?;
@@ -68,6 +68,11 @@ async fn main() -> Result<()> {
 
 ```rust
 let browser = Browser::launch().await?;
+let browser = Browser::launch_visible().await?;
+let browser = Browser::launch_debug().await?;
+let browser = Browser::launch_with(|config| {
+    config.proxy = Some("http://127.0.0.1:8080".into());
+}).await?;
 let browser = Browser::launch_with_config(config).await?;
 let page = browser.new_page("https://example.com").await?;
 let tabs = browser.tabs().await?;
@@ -249,6 +254,22 @@ page.with_retry(3, 500, || async {
 
 ## Config
 
+Most code does not need to construct a config. `Browser::launch()` starts with
+stealth defaults in headless mode. `Browser::launch_visible()` and
+`Browser::launch_debug()` are explicit opt-ins for local workflows that need a
+window.
+
+For small tweaks, mutate the default config inline:
+
+```rust
+let browser = Browser::launch_with(|config| {
+    config.headless = false;
+    config.proxy = Some("http://127.0.0.1:8080".into());
+}).await?;
+```
+
+For reusable presets or advanced setup, build a `StealthConfig` directly:
+
 ```rust
 let config = StealthConfig {
     headless: false,
@@ -259,7 +280,9 @@ let config = StealthConfig {
     ..Default::default()
 };
 
-// Presets
+let browser = Browser::launch_with_config(config).await?;
+
+// Presets for advanced config composition
 StealthConfig::visible()   // headless: false
 StealthConfig::debug()     // headless: false, debug: true
 ```

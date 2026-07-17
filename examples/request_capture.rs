@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example request_capture
 
-use eoka::{Browser, Result, StealthConfig};
+use eoka::{Browser, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -16,13 +16,8 @@ async fn main() -> Result<()> {
 
     println!("=== Eoka Request Capture Example ===\n");
 
-    let config = StealthConfig {
-        headless: true,
-        ..Default::default()
-    };
-
     println!("Launching browser...");
-    let browser = Browser::launch_with_config(config).await?;
+    let browser = Browser::launch().await?;
 
     // Create page
     let page = browser.new_page("about:blank").await?;

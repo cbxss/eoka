@@ -76,44 +76,40 @@ static PATCH_PATTERNS: &[PatchPattern] = &[
     },
 ];
 
-/// Compiled pattern matcher (lazy initialized)
+/// Matcher over all patterns (find) and over only rewritten patterns (verify).
 static PATTERN_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
+static VERIFY_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
 
-fn get_pattern_matcher() -> Result<&'static AhoCorasick> {
-    // OnceLock doesn't support fallible init, so we handle it via a separate error check.
-    // The patterns are static &[u8] literals — this will only fail on a bug in aho-corasick.
-    if let Some(ac) = PATTERN_MATCHER.get() {
+/// Build (once) an Aho-Corasick matcher over `PATCH_PATTERNS`, optionally
+/// excluding `Skip`-strategy patterns (those are detected but never rewritten,
+/// so verification must ignore them).
+fn build_matcher(
+    cell: &'static OnceLock<AhoCorasick>,
+    include_skip: bool,
+) -> Result<&'static AhoCorasick> {
+    if let Some(ac) = cell.get() {
         return Ok(ac);
     }
-    let patterns: Vec<&[u8]> = PATCH_PATTERNS.iter().map(|p| p.pattern).collect();
+    let patterns: Vec<&[u8]> = PATCH_PATTERNS
+        .iter()
+        .filter(|p| include_skip || p.strategy != PatchStrategy::Skip)
+        .map(|p| p.pattern)
+        .collect();
     let ac = AhoCorasick::new(&patterns).map_err(|e| {
         Error::patching(
             "init",
             format!("Failed to build Aho-Corasick automaton: {}", e),
         )
     })?;
-    Ok(PATTERN_MATCHER.get_or_init(|| ac))
+    Ok(cell.get_or_init(|| ac))
 }
 
-/// Matcher for patterns that patching actually rewrites (excludes `Skip`).
-static VERIFY_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
+fn get_pattern_matcher() -> Result<&'static AhoCorasick> {
+    build_matcher(&PATTERN_MATCHER, true)
+}
 
 fn get_verify_matcher() -> Result<&'static AhoCorasick> {
-    if let Some(ac) = VERIFY_MATCHER.get() {
-        return Ok(ac);
-    }
-    let patterns: Vec<&[u8]> = PATCH_PATTERNS
-        .iter()
-        .filter(|p| p.strategy != PatchStrategy::Skip)
-        .map(|p| p.pattern)
-        .collect();
-    let ac = AhoCorasick::new(&patterns).map_err(|e| {
-        Error::patching(
-            "init",
-            format!("Failed to build verification automaton: {}", e),
-        )
-    })?;
-    Ok(VERIFY_MATCHER.get_or_init(|| ac))
+    build_matcher(&VERIFY_MATCHER, false)
 }
 
 /// Stable temp-subdir name for the patched copy, keyed on the original binary's

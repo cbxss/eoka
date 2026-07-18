@@ -11,7 +11,7 @@ pub mod fingerprint;
 pub mod human;
 pub mod patcher;
 
-pub use evasions::{build_evasion_script, build_evasion_script_for, full_evasion_script};
+pub use evasions::{build_evasion_script, build_evasion_script_for};
 pub use fingerprint::{random_user_agent, Fingerprint, Platform};
 pub use human::{Human, HumanSpeed};
 pub use patcher::{find_chrome, ChromePatcher};

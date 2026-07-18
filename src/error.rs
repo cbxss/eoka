@@ -5,8 +5,11 @@ use thiserror::Error;
 /// Result type for eoka operations
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Error type for eoka
+/// Error type for eoka.
+///
+/// `#[non_exhaustive]`: match with a `_ =>` arm so new variants are additive.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Failed to launch Chrome
     #[error("Failed to launch Chrome: {0}")]
@@ -15,22 +18,24 @@ pub enum Error {
     /// Transport error
     #[error(fmt = transport_fmt)]
     Transport {
+        /// Description of what failed.
         context: String,
+        /// Underlying IO error, if any.
         #[source]
         source: Option<std::io::Error>,
     },
 
-    /// CDP protocol error
-    #[error("CDP error in {method}: {message} (code {code})")]
+    /// CDP protocol error. `method`/`code` carry command context when the error
+    /// came from a command response, and are `None` for context-free failures.
+    #[error(fmt = cdp_fmt)]
     Cdp {
-        method: String,
-        code: i64,
+        /// CDP command method that failed, if known.
+        method: Option<String>,
+        /// CDP error code, if known.
+        code: Option<i64>,
+        /// Error message.
         message: String,
     },
-
-    /// CDP error without method context (for simple cases)
-    #[error("CDP error: {0}")]
-    CdpSimple(String),
 
     /// Navigation error
     #[error("Navigation error: {0}")]
@@ -42,7 +47,10 @@ pub enum Error {
 
     /// Element exists in DOM but is not visible/rendered
     #[error("Element not visible: '{selector}' exists in DOM but is not rendered (hidden, display:none, or off-screen)")]
-    ElementNotVisible { selector: String },
+    ElementNotVisible {
+        /// Selector that matched the hidden element.
+        selector: String,
+    },
 
     /// Timeout
     #[error("Timeout: {0}")]
@@ -66,11 +74,83 @@ pub enum Error {
 
     /// Binary patching error
     #[error("Patching error in {operation}: {message}")]
-    Patching { operation: String, message: String },
+    Patching {
+        /// Patching operation that failed.
+        operation: String,
+        /// Error message.
+        message: String,
+    },
 
     /// Retry exhausted
     #[error("Retry exhausted after {attempts} attempts: {last_error}")]
-    RetryExhausted { attempts: u32, last_error: String },
+    RetryExhausted {
+        /// Number of attempts made before giving up.
+        attempts: u32,
+        /// The last error encountered.
+        last_error: String,
+    },
+}
+
+// `std::io::Error` and `serde_json::Error` aren't `Clone`, so we can't derive it.
+// Reconstruct both best-effort (kind + message) so `Error` — and thus the
+// broadcast `CdpMessage` — is cloneable.
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        use serde::de::Error as _;
+        match self {
+            Self::Launch(s) => Self::Launch(s.clone()),
+            Self::Transport { context, source } => Self::Transport {
+                context: context.clone(),
+                source: source
+                    .as_ref()
+                    .map(|e| std::io::Error::new(e.kind(), e.to_string())),
+            },
+            Self::Cdp {
+                method,
+                code,
+                message,
+            } => Self::Cdp {
+                method: method.clone(),
+                code: *code,
+                message: message.clone(),
+            },
+            Self::Navigation(s) => Self::Navigation(s.clone()),
+            Self::ElementNotFound(s) => Self::ElementNotFound(s.clone()),
+            Self::ElementNotVisible { selector } => Self::ElementNotVisible {
+                selector: selector.clone(),
+            },
+            Self::Timeout(s) => Self::Timeout(s.clone()),
+            Self::Serialization(e) => Self::Serialization(serde_json::Error::custom(e.to_string())),
+            Self::Decode(s) => Self::Decode(s.clone()),
+            Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),
+            Self::ChromeNotFound => Self::ChromeNotFound,
+            Self::Patching { operation, message } => Self::Patching {
+                operation: operation.clone(),
+                message: message.clone(),
+            },
+            Self::RetryExhausted {
+                attempts,
+                last_error,
+            } => Self::RetryExhausted {
+                attempts: *attempts,
+                last_error: last_error.clone(),
+            },
+        }
+    }
+}
+
+/// Display for the `Cdp` variant, including method/code context when present.
+fn cdp_fmt(
+    method: &Option<String>,
+    code: &Option<i64>,
+    message: &str,
+    f: &mut std::fmt::Formatter<'_>,
+) -> std::fmt::Result {
+    match (method, code) {
+        (Some(m), Some(c)) => write!(f, "CDP error in {}: {} (code {})", m, message, c),
+        (Some(m), None) => write!(f, "CDP error in {}: {}", m, message),
+        _ => write!(f, "CDP error: {}", message),
+    }
 }
 
 /// Display for the `Transport` variant, including the io error cause when present.
@@ -102,11 +182,20 @@ impl Error {
         }
     }
 
-    /// Create a CDP error with full context
+    /// Create a CDP error with full command context.
     pub fn cdp(method: impl Into<String>, code: i64, message: impl Into<String>) -> Self {
         Self::Cdp {
-            method: method.into(),
-            code,
+            method: Some(method.into()),
+            code: Some(code),
+            message: message.into(),
+        }
+    }
+
+    /// Create a CDP error without command context.
+    pub fn cdp_msg(message: impl Into<String>) -> Self {
+        Self::Cdp {
+            method: None,
+            code: None,
             message: message.into(),
         }
     }
@@ -150,6 +239,17 @@ mod tests {
             err.source().is_some(),
             "transport_io error should expose its io source"
         );
+    }
+
+    #[test]
+    fn test_cdp_display_with_and_without_context() {
+        let full = Error::cdp("DOM.resolveNode", -1, "boom");
+        assert_eq!(
+            format!("{full}"),
+            "CDP error in DOM.resolveNode: boom (code -1)"
+        );
+        let simple = Error::cdp_msg("no value");
+        assert_eq!(format!("{simple}"), "CDP error: no value");
     }
 
     #[test]

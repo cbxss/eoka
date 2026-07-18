@@ -67,6 +67,8 @@ src/
 
 ### Browser
 - `Browser::launch()` / `Browser::launch_with_config(config)`
+- `Browser::launch_visible()` / `Browser::launch_debug()` - Common presets without manual config
+- `Browser::launch_with(|config| { ... })` - Inline tweaks to default stealth config
 - `browser.new_page(url)` - Create page and navigate
 - `browser.tabs()` - List all open tabs (returns `Vec<TabInfo>`)
 - `browser.activate_tab(id)` - Focus a tab

@@ -20,13 +20,18 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// One entry from `GET /json` — a single browsing target (tab, iframe, worker).
 #[derive(Debug, Clone, Deserialize)]
 pub struct PageTarget {
+    /// Target ID.
     pub id: String,
+    /// Target title.
     #[serde(default)]
     pub title: String,
+    /// Target type (e.g. "page", "iframe", "worker").
     #[serde(rename = "type", default)]
     pub kind: String,
+    /// URL loaded in the target.
     #[serde(default)]
     pub url: String,
+    /// Per-target DevTools WebSocket URL.
     #[serde(rename = "webSocketDebuggerUrl", default)]
     pub web_socket_debugger_url: String,
 }

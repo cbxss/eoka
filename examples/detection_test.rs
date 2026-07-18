@@ -3,7 +3,7 @@
 //! Run with: cargo run --example detection_test
 //! Or visible: cargo run --example detection_test -- --visible
 
-use eoka::{Browser, Result, StealthConfig};
+use eoka::{Browser, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -18,17 +18,16 @@ async fn main() -> Result<()> {
     // Check for --visible flag
     let visible = std::env::args().any(|a| a == "--visible");
 
-    let config = StealthConfig {
-        headless: !visible,
-        ..Default::default()
-    };
-
     println!("=== Eoka Detection Test ===\n");
     println!("Mode: {}", if visible { "visible" } else { "headless" });
     println!();
 
     println!("Launching browser...");
-    let browser = Browser::launch_with_config(config).await?;
+    let browser = if visible {
+        Browser::launch_visible().await?
+    } else {
+        Browser::launch().await?
+    };
 
     // Test 1: bot.sannysoft.com
     println!("\n--- Test 1: bot.sannysoft.com ---\n");

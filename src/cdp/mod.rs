@@ -12,9 +12,13 @@
 pub mod connection;
 pub mod discover;
 pub mod transport;
-pub mod types;
+pub(crate) mod types;
 
+// Deliberate low-level escape hatch: `Connection`/`Session` (with only their
+// generic `send` + accessors public) and `Transport`. The hand-written
+// `cdp::types` structs stay crate-private so adding a CDP field is never a
+// breaking change.
 pub use connection::{Connection, Session};
 pub use discover::{auto_connect, discover_browser_ws, discover_pages, PageTarget};
 pub use transport::Transport;
-pub use types::*;
+pub(crate) use types::*;

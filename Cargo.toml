@@ -1,6 +1,6 @@
 [package]
 name = "eoka"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.74"
 license = "MIT"
@@ -17,8 +17,13 @@ authors = ["cbxss"]
 exclude = ["/.github", "*.png", "*.jpg", "*.jpeg"]
 
 [dependencies]
-# Async runtime (minimal features — no net/io-util/macros/rt-multi-thread)
-tokio = { version = "1", features = ["process", "sync", "time"] }
+# Async runtime (minimal features — net/io-util/rt needed for the async
+# tokio-tungstenite reader task; no macros/rt-multi-thread)
+tokio = { version = "1", features = ["process", "sync", "time", "net", "io-util", "rt"] }
+
+# WebSocket transport (no TLS — CDP is always ws:// localhost)
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

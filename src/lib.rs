@@ -10,7 +10,7 @@
 //!
 //! - **Stealth by Default** - Binary patching, 15 JS evasions, human-like mouse/typing
 //! - **Puppeteer-like API** - `click()`, `type()`, `wait_for()`, `screenshot()`, etc.
-//! - **Minimal Dependencies** - ~10 crates total, no chromiumoxide bloat
+//! - **Minimal Dependencies** - 11 direct crates, no chromiumoxide/puppeteer-extra bloat
 //! - **AI-Agent Ready** - PageState introspection, element indexing, text extraction
 //! - **Fast** - Lazy evasion scripts, mmap patching, stack-allocated paths
 //!
@@ -43,26 +43,30 @@
 //! ## Configuration
 //!
 //! ```rust,no_run
-//! use eoka::{Browser, StealthConfig};
+//! use eoka::Browser;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> eoka::Result<()> {
-//! let config = StealthConfig {
-//!     headless: true,
-//!     patch_binary: true,
-//!     webgl_spoof: true,
-//!     canvas_spoof: true,
-//!     ..Default::default()
-//! };
+//! // The default launch path is stealthy and headless.
+//! let browser = Browser::launch().await?;
+//! browser.close().await?;
 //!
-//! let browser = Browser::launch_with_config(config).await?;
+//! // For one-off tweaks, mutate the default stealth config inline.
+//! let browser = Browser::launch_with(|config| {
+//!     config.proxy = Some("http://127.0.0.1:8080".into());
+//! }).await?;
+//! browser.close().await?;
 //! # Ok(())
 //! # }
 //! ```
 
+#![deny(missing_docs)]
+
 pub mod browser;
 pub mod cdp;
+pub mod element;
 pub mod error;
+mod keyboard;
 pub mod network;
 pub mod page;
 pub mod session;
@@ -80,11 +84,10 @@ const _: () = {
 
 // Re-exports
 pub use browser::{Browser, TabInfo};
+pub use element::{BoundingBox, Element};
 pub use error::{Error, Result};
 pub use network::{NetworkEvent, NetworkWatcher};
-pub use page::{
-    BoundingBox, CapturedRequest, Element, FrameInfo, Page, PageState, ResponseBody, TextMatch,
-};
+pub use page::{CapturedRequest, FrameInfo, Page, PageState, ResponseBody, TextMatch};
 pub use session::{BrowserSession, SessionCookie};
 pub use stealth::{Fingerprint, HumanSpeed};
 
@@ -219,5 +222,21 @@ impl StealthConfig {
             human_typing: true,
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StealthConfig;
+
+    #[test]
+    fn default_config_is_headless() {
+        assert!(StealthConfig::default().headless);
+    }
+
+    #[test]
+    fn visible_configs_are_explicitly_not_headless() {
+        assert!(!StealthConfig::visible().headless);
+        assert!(!StealthConfig::debug().headless);
     }
 }

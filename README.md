@@ -14,7 +14,7 @@ Chrome or Chromium installed. eoka launches and controls it via CDP.
 
 ```toml
 [dependencies]
-eoka = "0.4"
+eoka = "0.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -42,11 +42,11 @@ async fn main() -> Result<()> {
 ## Login Flow Example
 
 ```rust
-use eoka::{Browser, Result, StealthConfig};
+use eoka::{Browser, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let browser = Browser::launch_with_config(StealthConfig::visible()).await?;
+    let browser = Browser::launch().await?;
     let page = browser.new_page("https://example.com/login").await?;
 
     page.try_click_by_text("Accept Cookies").await?;
@@ -68,6 +68,11 @@ async fn main() -> Result<()> {
 
 ```rust
 let browser = Browser::launch().await?;
+let browser = Browser::launch_visible().await?;
+let browser = Browser::launch_debug().await?;
+let browser = Browser::launch_with(|config| {
+    config.proxy = Some("http://127.0.0.1:8080".into());
+}).await?;
 let browser = Browser::launch_with_config(config).await?;
 let page = browser.new_page("https://example.com").await?;
 let tabs = browser.tabs().await?;
@@ -186,6 +191,25 @@ browser.activate_tab(page1.target_id()).await?;
 browser.close_tab(page2.target_id()).await?;
 ```
 
+### Connect to an existing Chrome
+
+Attach to a browser you already launched with `--remote-debugging-port` instead of
+spawning one. Defaults to `StealthConfig::live()`, so the user's tabs are left
+untouched (no evasion injection).
+
+```rust
+// Start Chrome yourself: chrome --remote-debugging-port=9222
+let browser = Browser::connect_port(9222).await?;           // HTTP discovery
+// or, with the ws:// URL from http://localhost:9222/json/version:
+let browser = Browser::connect("ws://127.0.0.1:9222/devtools/browser/...").await?;
+
+for tab in browser.tabs().await? {
+    println!("{} — {}", tab.title, tab.url);
+}
+let page = browser.attach_page(&target_id).await?;
+browser.disconnect().await?;                                // leaves Chrome running
+```
+
 ### Navigation
 
 ```rust
@@ -230,6 +254,22 @@ page.with_retry(3, 500, || async {
 
 ## Config
 
+Most code does not need to construct a config. `Browser::launch()` starts with
+stealth defaults in headless mode. `Browser::launch_visible()` and
+`Browser::launch_debug()` are explicit opt-ins for local workflows that need a
+window.
+
+For small tweaks, mutate the default config inline:
+
+```rust
+let browser = Browser::launch_with(|config| {
+    config.headless = false;
+    config.proxy = Some("http://127.0.0.1:8080".into());
+}).await?;
+```
+
+For reusable presets or advanced setup, build a `StealthConfig` directly:
+
 ```rust
 let config = StealthConfig {
     headless: false,
@@ -240,7 +280,9 @@ let config = StealthConfig {
     ..Default::default()
 };
 
-// Presets
+let browser = Browser::launch_with_config(config).await?;
+
+// Presets for advanced config composition
 StealthConfig::visible()   // headless: false
 StealthConfig::debug()     // headless: false, debug: true
 ```
@@ -254,7 +296,7 @@ Patches Chrome binary, injects 15 evasion scripts, blocks detectable CDP command
 
 ## How it Works
 
-~5K lines of Rust. No chromiumoxide, no puppeteer-extra. Hand-written CDP types for the ~30 commands actually needed. 9 crate dependencies.
+~9K lines of Rust (about 1.3K of that is tests). No chromiumoxide, no puppeteer-extra. Hand-written CDP types for the ~30 commands actually needed. Minimal dependency graph.
 
 ```
 src/

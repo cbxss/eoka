@@ -3,7 +3,7 @@
 //! Run with: cargo run --example bestbuy_cart
 //! Or visible: cargo run --example bestbuy_cart -- --visible
 
-use eoka::{Browser, Result, StealthConfig};
+use eoka::{Browser, Result};
 
 const PRODUCT_URL: &str = "https://www.bestbuy.com/product/steelseries-apex-3-full-size-wired-membrane-whisper-quiet-switch-gaming-keyboard-with-10-zone-rgb-backlighting-black/J3LG47VT9S";
 
@@ -18,17 +18,16 @@ async fn main() -> Result<()> {
 
     let visible = std::env::args().any(|a| a == "--visible");
 
-    let config = StealthConfig {
-        headless: !visible,
-        ..Default::default()
-    };
-
     println!("=== Best Buy Add to Cart ===\n");
     println!("Mode: {}", if visible { "visible" } else { "headless" });
     println!("Product URL: {}\n", PRODUCT_URL);
 
     println!("Launching browser...");
-    let browser = Browser::launch_with_config(config).await?;
+    let browser = if visible {
+        Browser::launch_visible().await?
+    } else {
+        Browser::launch().await?
+    };
 
     let page = browser.new_page(PRODUCT_URL).await?;
 

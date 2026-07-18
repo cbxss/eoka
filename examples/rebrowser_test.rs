@@ -3,7 +3,7 @@
 //! Run with: cargo run --example rebrowser_test
 //! Or visible: cargo run --example rebrowser_test -- --visible
 
-use eoka::{Browser, Result, StealthConfig};
+use eoka::{Browser, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -16,16 +16,15 @@ async fn main() -> Result<()> {
 
     let visible = std::env::args().any(|a| a == "--visible");
 
-    let config = StealthConfig {
-        headless: !visible,
-        ..Default::default()
-    };
-
     println!("=== Rebrowser Bot Detector Test ===\n");
     println!("Mode: {}", if visible { "visible" } else { "headless" });
 
     println!("\nLaunching browser...");
-    let browser = Browser::launch_with_config(config).await?;
+    let browser = if visible {
+        Browser::launch_visible().await?
+    } else {
+        Browser::launch().await?
+    };
 
     let page = browser
         .new_page("https://bot-detector.rebrowser.net/")

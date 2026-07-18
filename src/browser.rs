@@ -81,8 +81,11 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
 /// Info about an open tab
 #[derive(Debug, Clone)]
 pub struct TabInfo {
+    /// Target ID of the tab.
     pub id: String,
+    /// Tab title.
     pub title: String,
+    /// URL currently loaded in the tab.
     pub url: String,
 }
 
@@ -134,6 +137,26 @@ impl Browser {
         Self::launch_with_config(StealthConfig::default()).await
     }
 
+    /// Launch a new stealth browser with a visible window.
+    pub async fn launch_visible() -> Result<Self> {
+        Self::launch_with_config(StealthConfig::visible()).await
+    }
+
+    /// Launch a new visible stealth browser with debug logging behavior enabled.
+    pub async fn launch_debug() -> Result<Self> {
+        Self::launch_with_config(StealthConfig::debug()).await
+    }
+
+    /// Launch with the default stealth config after applying inline changes.
+    ///
+    /// This avoids constructing a full [`StealthConfig`] when only one or two
+    /// options need to change.
+    pub async fn launch_with(configure: impl FnOnce(&mut StealthConfig)) -> Result<Self> {
+        let mut config = StealthConfig::default();
+        configure(&mut config);
+        Self::launch_with_config(config).await
+    }
+
     /// Launch with custom config
     pub async fn launch_with_config(config: StealthConfig) -> Result<Self> {
         let config = Arc::new(config);
@@ -178,7 +201,7 @@ impl Browser {
                 _ => None,
             };
             let transport =
-                Transport::new_with_options(child, &ws_url, proxy_auth, config.cdp_timeout)?;
+                Transport::new_with_options(child, &ws_url, proxy_auth, config.cdp_timeout).await?;
             let connection = Connection::new(transport);
 
             let version = connection.version().await?;
@@ -225,7 +248,8 @@ impl Browser {
             ws_url,
             config.cdp_timeout,
             config.filter_cdp,
-        )?;
+        )
+        .await?;
         let connection = Connection::new(transport);
         let version = connection.version().await?;
         tracing::info!("Connected to Chrome: {}", version.product);

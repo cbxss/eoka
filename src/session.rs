@@ -6,39 +6,27 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::cdp::Cookie;
 use crate::error::Result;
 
 /// Browser cookie (simplified, serializable)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCookie {
+    /// Cookie name.
     pub name: String,
+    /// Cookie value.
     pub value: String,
+    /// Domain the cookie applies to.
     pub domain: String,
+    /// Path the cookie applies to.
     pub path: String,
+    /// Whether the cookie is sent only over HTTPS.
     pub secure: bool,
+    /// Whether the cookie is inaccessible to JavaScript.
     pub http_only: bool,
+    /// SameSite policy ("Strict", "Lax", "None"), if set.
     pub same_site: Option<String>,
+    /// Expiry as a Unix timestamp in seconds, or `None` for a session cookie.
     pub expires: Option<f64>,
-}
-
-impl From<Cookie> for SessionCookie {
-    fn from(c: Cookie) -> Self {
-        Self {
-            name: c.name,
-            value: c.value,
-            domain: c.domain,
-            path: c.path,
-            secure: c.secure,
-            http_only: c.http_only,
-            same_site: c.same_site,
-            expires: if c.expires > 0.0 {
-                Some(c.expires)
-            } else {
-                None
-            },
-        }
-    }
 }
 
 /// Exported browser session
@@ -57,9 +45,9 @@ pub struct BrowserSession {
 
 impl BrowserSession {
     /// Create a new session from cookies
-    pub fn new(cookies: Vec<Cookie>, user_agent: String, url: String) -> Self {
+    pub fn new(cookies: Vec<SessionCookie>, user_agent: String, url: String) -> Self {
         Self {
-            cookies: cookies.into_iter().map(SessionCookie::from).collect(),
+            cookies,
             user_agent,
             url,
             extra_headers: HashMap::new(),

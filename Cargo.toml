@@ -22,7 +22,7 @@ exclude = ["/.github", "*.png", "*.jpg", "*.jpeg"]
 tokio = { version = "1", features = ["process", "sync", "time", "net", "io-util", "rt"] }
 
 # WebSocket transport (no TLS — CDP is always ws:// localhost)
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 # Serialization

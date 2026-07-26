@@ -43,6 +43,24 @@ pub struct BrowserSession {
     pub extra_headers: HashMap<String, String>,
 }
 
+/// Complete browser state for restoring an authenticated browser session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserState {
+    /// All browser cookies, including HttpOnly cookies.
+    pub cookies: Vec<SessionCookie>,
+    /// Storage associated with the saved URL's origin.
+    #[serde(default)]
+    pub local_storage: HashMap<String, String>,
+    /// Per-tab storage associated with the saved URL's origin.
+    #[serde(default)]
+    pub session_storage: HashMap<String, String>,
+    /// User agent active when the state was captured.
+    pub user_agent: String,
+    /// URL whose origin owns the captured storage.
+    pub url: String,
+}
+
 impl BrowserSession {
     /// Create a new session from cookies
     pub fn new(cookies: Vec<SessionCookie>, user_agent: String, url: String) -> Self {
@@ -179,6 +197,34 @@ mod tests {
 
         let header = session.cookie_header();
         assert_eq!(header, "a=1; b=2");
+    }
+
+    #[test]
+    fn test_browser_state_round_trips_storage_and_http_only_cookie() {
+        let state = BrowserState {
+            cookies: vec![SessionCookie {
+                name: "session".to_string(),
+                value: "secret".to_string(),
+                domain: ".example.com".to_string(),
+                path: "/".to_string(),
+                secure: true,
+                http_only: true,
+                same_site: Some("Lax".to_string()),
+                expires: None,
+            }],
+            local_storage: HashMap::from([("token".to_string(), "value".to_string())]),
+            session_storage: HashMap::from([("tab".to_string(), "value".to_string())]),
+            user_agent: "Mozilla/5.0".to_string(),
+            url: "https://example.com/account".to_string(),
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: BrowserState = serde_json::from_str(&json).unwrap();
+
+        assert!(restored.cookies[0].http_only);
+        assert_eq!(restored.local_storage["token"], "value");
+        assert_eq!(restored.session_storage["tab"], "value");
+        assert_eq!(restored.url, "https://example.com/account");
     }
 
     #[test]

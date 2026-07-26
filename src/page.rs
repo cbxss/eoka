@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::cdp::{MouseButton, MouseEventType, Session};
 use crate::error::{Error, Result};
 use crate::keyboard::{key_to_codes, parse_key_combo};
-use crate::session::SessionCookie;
+use crate::session::{BrowserState, SessionCookie};
 use crate::stealth::Human;
 use crate::StealthConfig;
 
@@ -712,6 +712,45 @@ impl Page {
             })
             .collect();
         self.session.set_cookies(cdp_cookies).await
+    }
+
+    /// Capture cookies and origin storage needed to restore an authenticated session.
+    pub async fn capture_state(&self) -> Result<BrowserState> {
+        let cookies = self.cookies().await?;
+        let local_storage = self
+            .evaluate("Object.fromEntries(Object.entries(localStorage))")
+            .await?;
+        let session_storage = self
+            .evaluate("Object.fromEntries(Object.entries(sessionStorage))")
+            .await?;
+        let user_agent = self.evaluate("navigator.userAgent").await?;
+        let url = self.url().await?;
+
+        Ok(BrowserState {
+            cookies,
+            local_storage,
+            session_storage,
+            user_agent,
+            url,
+        })
+    }
+
+    /// Restore a captured browser state and reload its saved URL.
+    pub async fn restore_state(&self, state: &BrowserState) -> Result<()> {
+        self.set_user_agent(&state.user_agent).await?;
+        self.goto(&state.url).await?;
+        self.clear_all_cookies().await?;
+        self.set_cookies_bulk(state.cookies.clone()).await?;
+
+        let storage = serde_json::to_string(&serde_json::json!({
+            "localStorage": state.local_storage,
+            "sessionStorage": state.session_storage,
+        }))?;
+        self.execute(&format!(
+            "(() => {{ const state = {storage}; localStorage.clear(); sessionStorage.clear(); for (const [key, value] of Object.entries(state.localStorage)) localStorage.setItem(key, value); for (const [key, value] of Object.entries(state.sessionStorage)) sessionStorage.setItem(key, value); }})()"
+        ))
+        .await?;
+        self.goto(&state.url).await
     }
 
     /// Set extra HTTP headers sent with every subsequent request from this page.

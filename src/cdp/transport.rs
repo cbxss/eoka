@@ -245,8 +245,8 @@ impl Transport {
         loop {
             let text = match source.next().await {
                 Some(Ok(Message::Text(t))) => t,
-                Some(Ok(Message::Binary(b))) => match String::from_utf8(b) {
-                    Ok(s) => s,
+                Some(Ok(Message::Binary(b))) => match String::from_utf8(b.to_vec()) {
+                    Ok(s) => s.into(),
                     Err(_) => continue,
                 },
                 Some(Ok(Message::Ping(payload))) => {
@@ -334,7 +334,7 @@ impl Transport {
                             }
                             if let Ok(data) = serde_json::to_string(&response) {
                                 let mut w = writer.lock().await;
-                                if let Err(e) = w.send(Message::Text(data)).await {
+                                if let Err(e) = w.send(Message::Text(data.into())).await {
                                     tracing::error!(
                                         "Failed to send proxy auth response: {} — connection may be broken",
                                         e
@@ -432,7 +432,7 @@ impl Transport {
         // Write to WebSocket — clean up pending entry on failure
         if let Err(e) = {
             let mut writer = self.writer.lock().await;
-            writer.send(Message::Text(data)).await
+            writer.send(Message::Text(data.into())).await
         } {
             let mut pending = self.pending.lock().unwrap();
             pending.remove(&id);

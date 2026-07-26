@@ -88,7 +88,7 @@ pub use element::{BoundingBox, Element};
 pub use error::{Error, Result};
 pub use network::{NetworkEvent, NetworkWatcher};
 pub use page::{CapturedRequest, FrameInfo, Page, PageState, ResponseBody, TextMatch};
-pub use session::{BrowserSession, SessionCookie};
+pub use session::{BrowserSession, BrowserState, SessionCookie};
 pub use stealth::{Fingerprint, HumanSpeed};
 
 /// Configuration for stealth features

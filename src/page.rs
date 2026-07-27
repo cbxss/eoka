@@ -181,7 +181,14 @@ impl Page {
         })
     }
 
-    /// Navigate to a URL
+    /// Start navigation to a URL.
+    ///
+    /// This returns once Chrome accepts the navigation rather than waiting for
+    /// `document.readyState`. A page can legally remain in `loading` forever
+    /// (for example, a single-page app with a long-lived resource), and making
+    /// navigation wait on that state turns a best-effort convenience into a
+    /// 30-second command stall. Call an explicit wait method when a later
+    /// action actually needs a particular element or condition.
     pub async fn goto(&self, url: &str) -> Result<()> {
         self.navigate_impl(url, None).await
     }
@@ -787,28 +794,12 @@ impl Page {
         let result = self.session.navigate(url, referrer).await?;
         Self::check_nav_result(&result)?;
         self.invalidate_document();
-        self.wait_for_load(self.config.cdp_timeout.saturating_mul(1000))
-            .await;
-        Ok(())
-    }
-
-    /// Poll `document.readyState` until interactive/complete or the budget elapses.
-    async fn wait_for_load(&self, timeout_ms: u64) {
-        let start = std::time::Instant::now();
-        loop {
-            let state: String = self
-                .evaluate_sync("document.readyState")
-                .await
-                .unwrap_or_default();
-            if state == "complete" || state == "interactive" {
-                break;
-            }
-            if start.elapsed().as_millis() as u64 >= timeout_ms {
-                break;
-            }
-            sleep_ms(POLL_INTERVAL_MS).await;
-        }
+        // Give Chrome a brief opportunity to install the new document, but do
+        // not probe readyState here. A Runtime.evaluate issued while a SPA is
+        // tearing down its previous document can itself wait for the full CDP
+        // command timeout and block a persistent automation daemon.
         sleep_ms(SETTLE_MS).await;
+        Ok(())
     }
 
     /// Disable CSP enforcement for the current page.

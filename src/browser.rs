@@ -3,6 +3,7 @@
 //! Handles Chrome discovery, launching with stealth flags, and binary patching.
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -173,9 +174,6 @@ impl Browser {
         let _ = std::fs::remove_dir_all(&user_data_dir);
         std::fs::create_dir_all(&user_data_dir)?;
 
-        let fingerprint =
-            Fingerprint::resolve(config.user_agent.as_deref(), config.timezone.as_deref());
-
         // Clean up the temp user-data-dir on any failure past this point.
         let launch = async {
             let chrome_path = match &config.chrome_path {
@@ -188,6 +186,19 @@ impl Browser {
             } else {
                 chrome_path
             };
+
+            let detected_user_agent = if config.user_agent.is_none() {
+                installed_chrome_user_agent(&chrome_path)
+            } else {
+                None
+            };
+            let fingerprint = Fingerprint::resolve(
+                config
+                    .user_agent
+                    .as_deref()
+                    .or(detected_user_agent.as_deref()),
+                config.timezone.as_deref(),
+            );
 
             // Build args
             let mut args = stealth_args(&config, &fingerprint);
@@ -207,12 +218,12 @@ impl Browser {
             let version = connection.version().await?;
             tracing::info!("Connected to Chrome: {}", version.product);
 
-            Ok::<Connection, Error>(connection)
+            Ok::<(Connection, Fingerprint), Error>((connection, fingerprint))
         }
         .await;
 
-        let connection = match launch {
-            Ok(c) => c,
+        let (connection, fingerprint) = match launch {
+            Ok(result) => result,
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&user_data_dir);
                 return Err(e);
@@ -403,6 +414,21 @@ impl Browser {
     pub async fn disconnect(self) -> Result<()> {
         self.connection.transport().close().await
     }
+}
+
+/// Read Chrome's executable version and derive a coherent native UA. Failure
+/// is intentionally non-fatal: callers fall back to a current fingerprint.
+fn installed_chrome_user_agent(chrome_path: &std::path::Path) -> Option<String> {
+    let output = Command::new(chrome_path).arg("--version").output().ok()?;
+    let version = String::from_utf8_lossy(&output.stdout);
+    let full_version = version.split_whitespace().find(|part| {
+        let pieces: Vec<_> = part.split('.').collect();
+        pieces.len() == 4
+            && pieces
+                .iter()
+                .all(|piece| !piece.is_empty() && piece.bytes().all(|byte| byte.is_ascii_digit()))
+    })?;
+    Fingerprint::native_chrome_user_agent(full_version)
 }
 
 impl Drop for Browser {

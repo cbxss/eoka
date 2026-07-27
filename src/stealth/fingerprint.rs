@@ -12,6 +12,7 @@ const CHROME_VERSIONS: &[(&str, &str)] = &[
     ("138", "138.0.7204.101"),
     ("139", "139.0.7258.139"),
     ("140", "140.0.7312.86"),
+    ("150", "150.0.7871.182"),
 ];
 
 /// macOS client-hint platform versions (UA string is frozen at 10_15_7).
@@ -148,6 +149,22 @@ pub enum Platform {
 }
 
 impl Fingerprint {
+    /// Build a platform-consistent UA for the actual Chrome binary Eoka is
+    /// launching. This avoids advertising an obsolete Chrome release while
+    /// the browser exposes a newer TLS and JavaScript surface.
+    pub fn native_chrome_user_agent(chrome_full_version: &str) -> Option<String> {
+        let major = chrome_full_version.split('.').next()?;
+        if major.is_empty()
+            || !major.bytes().all(|byte| byte.is_ascii_digit())
+            || chrome_full_version
+                .split('.')
+                .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return None;
+        }
+        Some(ua_for(native_platform(), chrome_full_version))
+    }
+
     /// Build a fully coherent identity for a platform + Chrome version.
     fn build(platform: Platform, chrome_major: String, chrome_full_version: String) -> Self {
         let (webgl_vendor, webgl_renderer, platform_version) = platform_surfaces(platform);
@@ -252,6 +269,20 @@ impl Fingerprint {
     }
 }
 
+fn native_platform() -> Platform {
+    #[cfg(target_os = "macos")]
+    {
+        Platform::MacOS
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // The current stealth profiles model desktop Windows and macOS. On
+        // Linux hosts, retain the existing Windows profile rather than emit a
+        // partially modelled Linux identity.
+        Platform::Windows
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +332,13 @@ mod tests {
         assert_eq!(fp.platform, Platform::Windows);
         assert_eq!(fp.chrome_major, "140");
         assert_eq!(fp.nav_platform(), "Win32");
+    }
+
+    #[test]
+    fn test_native_chrome_user_agent_uses_supplied_version() {
+        let ua = Fingerprint::native_chrome_user_agent("150.0.7871.182").unwrap();
+        assert!(ua.contains("Chrome/150.0.7871.182"));
+        assert!(Fingerprint::native_chrome_user_agent("not-a-version").is_none());
     }
 
     // Over many samples, every random fingerprint must be internally coherent:

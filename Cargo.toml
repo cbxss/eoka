@@ -43,7 +43,7 @@ memmap2 = "0.9"
 fastrand = "2"
 
 # Base64 for screenshots
-base64 = "0.22"
+base64 = "0.23"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

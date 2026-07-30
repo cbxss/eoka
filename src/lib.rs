@@ -122,6 +122,9 @@ pub struct StealthConfig {
     pub debug_dir: Option<String>,
     /// Proxy server URL (e.g. "http://host:port")
     pub proxy: Option<String>,
+    /// Durable Chrome user-data directory. When set, Eoka preserves the
+    /// profile and its full fingerprint identity across browser launches.
+    pub user_data_dir: Option<String>,
     /// Proxy username for authenticated proxies
     pub proxy_username: Option<String>,
     /// Proxy password for authenticated proxies
@@ -164,6 +167,7 @@ impl Default for StealthConfig {
             debug: false,
             debug_dir: None,
             proxy: None,
+            user_data_dir: None,
             proxy_username: None,
             proxy_password: None,
             cdp_timeout: 30,

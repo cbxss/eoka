@@ -792,7 +792,7 @@ pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> Str
             .join(",")
     );
     let language = fp.languages.first().cloned().unwrap_or_default();
-    let noise_seed = fastrand::u32(1..=u32::MAX);
+    let noise_seed = fp.noise_seed;
 
     let script = format!("(function(){{{}}})();", scripts.join("\n"));
     script

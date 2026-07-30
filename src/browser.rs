@@ -56,6 +56,12 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
             "--window-size={},{}",
             config.viewport_width, config.viewport_height
         ),
+        // Keep Chromium's virtual screen aligned with the viewport in new
+        // headless mode; otherwise it reports a fixed 800x600 screen.
+        format!(
+            "--ozone-override-screen-size={},{}",
+            config.viewport_width, config.viewport_height
+        ),
     ];
 
     // User agent

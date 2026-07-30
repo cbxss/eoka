@@ -21,6 +21,10 @@ const MACOS_CH_VERSIONS: &[&str] = &["13.6.0", "14.4.1", "14.5.0", "14.6.1", "15
 /// Windows client-hint platform versions.
 const WINDOWS_CH_VERSIONS: &[&str] = &["10.0.0", "15.0.0"];
 
+/// Linux client-hint platform versions. Chromium exposes a kernel-style
+/// version here rather than advertising the distribution release.
+const LINUX_CH_VERSIONS: &[&str] = &["5.15.0", "6.8.0"];
+
 /// WebGL renderers for Mac
 const WEBGL_RENDERERS_MAC: &[&str] = &[
     "ANGLE (Apple, Apple M1 Pro, OpenGL 4.1)",
@@ -40,6 +44,13 @@ const WEBGL_RENDERERS_WINDOWS: &[&str] = &[
     "ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0, D3D11)",
 ];
 
+/// Common Chromium-on-Linux software renderer. Native Linux profiles leave
+/// WebGL untouched; this is only used when callers explicitly request a
+/// synthetic Linux profile.
+const WEBGL_RENDERERS_LINUX: &[&str] = &[
+    "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 16.0.0) (0x0000C0DE)), SwiftShader driver)",
+];
+
 /// Platform-specific screen resolutions.
 const SCREEN_RESOLUTIONS_MAC: &[(u32, u32)] = &[
     (1440, 900),
@@ -57,6 +68,8 @@ const SCREEN_RESOLUTIONS_WINDOWS: &[(u32, u32)] = &[
     (1536, 864),
     (1600, 900),
 ];
+const SCREEN_RESOLUTIONS_LINUX: &[(u32, u32)] =
+    &[(1920, 1080), (2560, 1440), (1366, 768), (1600, 900)];
 
 /// Pick a random element from a slice
 fn choose<T>(slice: &[T]) -> &T {
@@ -76,6 +89,11 @@ fn platform_surfaces(platform: Platform) -> (&'static str, String, String) {
             choose(WEBGL_RENDERERS_WINDOWS).to_string(),
             choose(WINDOWS_CH_VERSIONS).to_string(),
         ),
+        Platform::Linux => (
+            "Google Inc. (Google)",
+            choose(WEBGL_RENDERERS_LINUX).to_string(),
+            choose(LINUX_CH_VERSIONS).to_string(),
+        ),
     }
 }
 
@@ -84,6 +102,7 @@ fn platform_screen(platform: Platform) -> (u32, u32) {
     match platform {
         Platform::MacOS => *choose(SCREEN_RESOLUTIONS_MAC),
         Platform::Windows => *choose(SCREEN_RESOLUTIONS_WINDOWS),
+        Platform::Linux => *choose(SCREEN_RESOLUTIONS_LINUX),
     }
 }
 
@@ -97,6 +116,10 @@ fn ua_for(platform: Platform, chrome_full_version: &str) -> String {
         Platform::Windows => format!(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{} Safari/537.36",
             chrome_full_version
+        ),
+        Platform::Linux => format!(
+            "Mozilla/5.0 (X11; Linux {}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{} Safari/537.36",
+            native_linux_arch(), chrome_full_version
         ),
     }
 }
@@ -146,6 +169,8 @@ pub enum Platform {
     MacOS,
     /// Windows.
     Windows,
+    /// Linux.
+    Linux,
 }
 
 impl Fingerprint {
@@ -205,6 +230,8 @@ impl Fingerprint {
             Some(ua) => {
                 let platform = if ua.contains("Macintosh") || ua.contains("Mac OS X") {
                     Platform::MacOS
+                } else if ua.contains("Linux") {
+                    Platform::Linux
                 } else {
                     Platform::Windows
                 };
@@ -235,6 +262,7 @@ impl Fingerprint {
         match self.platform {
             Platform::MacOS => "MacIntel",
             Platform::Windows => "Win32",
+            Platform::Linux => "Linux x86_64",
         }
     }
 
@@ -243,6 +271,7 @@ impl Fingerprint {
         match self.platform {
             Platform::MacOS => "macOS",
             Platform::Windows => "Windows",
+            Platform::Linux => "Linux",
         }
     }
 
@@ -274,12 +303,24 @@ fn native_platform() -> Platform {
     {
         Platform::MacOS
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        // The current stealth profiles model desktop Windows and macOS. On
-        // Linux hosts, retain the existing Windows profile rather than emit a
-        // partially modelled Linux identity.
         Platform::Windows
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        Platform::Linux
+    }
+}
+
+fn native_linux_arch() -> &'static str {
+    #[cfg(target_arch = "aarch64")]
+    {
+        "aarch64"
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        "x86_64"
     }
 }
 
@@ -317,6 +358,9 @@ mod tests {
                     assert!(fp.user_agent.contains("Windows NT 10.0"));
                     assert_eq!(fp.nav_platform(), "Win32");
                     assert_eq!(fp.ch_platform(), "Windows");
+                }
+                Platform::Linux => {
+                    unreachable!("random profiles currently target macOS or Windows")
                 }
             }
             assert!(fp.user_agent.contains(&fp.chrome_full_version));
@@ -371,6 +415,9 @@ mod tests {
                     );
                     assert_eq!(fp.nav_platform(), "Win32");
                     assert_eq!(fp.ch_platform(), "Windows");
+                }
+                Platform::Linux => {
+                    unreachable!("random profiles currently target macOS or Windows")
                 }
             }
             // The UA always advertises the full Chrome version, and the full
@@ -436,6 +483,9 @@ mod tests {
                         res
                     );
                 }
+                Platform::Linux => {
+                    unreachable!("random profiles currently target macOS or Windows")
+                }
             }
         }
     }
@@ -467,6 +517,17 @@ mod tests {
             "mac fp got non-mac renderer: {}",
             fp.webgl_renderer
         );
+    }
+
+    #[test]
+    fn test_resolve_linux_ua_is_coherent() {
+        let ua = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.186 Safari/537.36";
+        let fp = Fingerprint::resolve(Some(ua), Some("America/Los_Angeles"));
+        assert_eq!(fp.platform, Platform::Linux);
+        assert_eq!(fp.nav_platform(), "Linux x86_64");
+        assert_eq!(fp.ch_platform(), "Linux");
+        assert_eq!(fp.timezone, "America/Los_Angeles");
+        assert!(WEBGL_RENDERERS_LINUX.contains(&fp.webgl_renderer.as_str()));
     }
 
     #[test]

@@ -292,7 +292,10 @@ impl Fingerprint {
             let fingerprint: Self = serde_json::from_slice(&contents).map_err(|error| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("invalid persisted browser identity {}: {error}", path.display()),
+                    format!(
+                        "invalid persisted browser identity {}: {error}",
+                        path.display()
+                    ),
                 )
             })?;
             if let Some(user_agent) = user_agent {
@@ -315,7 +318,10 @@ impl Fingerprint {
         }
 
         let fingerprint = Self::resolve(user_agent, timezone);
-        let temporary = profile_dir.join(format!("{PERSISTED_FINGERPRINT_FILE}.tmp-{}", std::process::id()));
+        let temporary = profile_dir.join(format!(
+            "{PERSISTED_FINGERPRINT_FILE}.tmp-{}",
+            std::process::id()
+        ));
         let encoded = serde_json::to_vec_pretty(&fingerprint).map_err(io::Error::other)?;
         fs::write(&temporary, encoded)?;
         fs::rename(temporary, path)?;
@@ -464,8 +470,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let first = Fingerprint::resolve_for_profile(None, Some("America/Los_Angeles"), Some(&dir))
             .unwrap();
-        let second = Fingerprint::resolve_for_profile(None, Some("America/Los_Angeles"), Some(&dir))
-            .unwrap();
+        let second =
+            Fingerprint::resolve_for_profile(None, Some("America/Los_Angeles"), Some(&dir))
+                .unwrap();
         assert_eq!(first.user_agent, second.user_agent);
         assert_eq!(first.hardware_concurrency, second.hardware_concurrency);
         assert_eq!(first.device_memory, second.device_memory);
@@ -483,7 +490,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         Fingerprint::resolve_for_profile(Some("Mozilla/5.0 first"), None, Some(&dir)).unwrap();
-        assert!(Fingerprint::resolve_for_profile(Some("Mozilla/5.0 second"), None, Some(&dir)).is_err());
+        assert!(
+            Fingerprint::resolve_for_profile(Some("Mozilla/5.0 second"), None, Some(&dir)).is_err()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

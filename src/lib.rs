@@ -134,6 +134,10 @@ pub struct StealthConfig {
     /// Extra Chrome command-line arguments appended after standard stealth args.
     /// E.g. vec!["--use-fake-ui-for-media-stream".into()] to auto-grant camera.
     pub extra_args: Vec<String>,
+    /// Enable legacy, invasive CDP-marker hiding that proxies `window.document`
+    /// and patches Object reflection APIs. It can break modern SPAs, so it is
+    /// disabled by default. Prefer the normal WebDriver and fingerprint evasions.
+    pub aggressive_cdp_evasion: bool,
     /// Treat this as a session attached to a user-owned browser. When true,
     /// `Browser::new_page`/`new_blank_page`/`attach_page` skip injecting the
     /// evasion script. Defaults to false (set automatically by `Browser::connect*`).
@@ -165,6 +169,7 @@ impl Default for StealthConfig {
             cdp_timeout: 30,
             timezone: None, // Random from common timezones
             extra_args: Vec::new(),
+            aggressive_cdp_evasion: false,
             live_session: false,
             filter_cdp: true,
         }

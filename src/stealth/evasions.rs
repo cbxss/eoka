@@ -758,7 +758,6 @@ pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> Str
     let mut scripts = vec![
         NATIVE_TOSTRING_EVASION, // must be first: defines _eoka_mark / _eoka_rand
         WEBDRIVER_EVASION,
-        CDP_EVASION,
         CHROME_RUNTIME_EVASION,
         PERMISSIONS_EVASION,
         PLUGINS_EVASION,
@@ -772,6 +771,13 @@ pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> Str
         BLUETOOTH_EVASION,
         TIMEZONE_EVASION,
     ];
+
+    // This legacy module globally proxies `window.document` and patches Object
+    // reflection methods. Keep it available for callers that explicitly need
+    // it, but do not make a page's core DOM behavior depend on it by default.
+    if config.aggressive_cdp_evasion {
+        scripts.push(CDP_EVASION);
+    }
 
     if config.webgl_spoof || config.canvas_spoof || config.audio_spoof {
         scripts.push(FINGERPRINT_EVASION);
@@ -822,6 +828,16 @@ mod tests {
         assert!(script.contains("WebGLRenderingContext"));
         assert!(script.contains("HTMLCanvasElement"));
         assert!(script.contains("AudioBuffer"));
+        assert!(!script.contains("const documentProxy"));
+    }
+
+    #[test]
+    fn test_aggressive_cdp_evasion_is_opt_in() {
+        let config = StealthConfig {
+            aggressive_cdp_evasion: true,
+            ..StealthConfig::default()
+        };
+        assert!(build_evasion_script(&config).contains("const documentProxy"));
     }
 
     #[test]

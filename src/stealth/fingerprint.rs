@@ -1,6 +1,18 @@
 //! Browser fingerprint generation
 //!
-//! Generates realistic, randomized, internally consistent browser fingerprints.
+//! Generates realistic, internally consistent browser fingerprints.
+//!
+//! Ephemeral browsers may use a random identity. A browser backed by a durable
+//! user-data directory must not: changing WebGL, CPU, or memory values between
+//! visits makes a supposedly persistent login look like a new device.
+
+use std::fs;
+use std::io;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+const PERSISTED_FINGERPRINT_FILE: &str = ".eoka-fingerprint.json";
 
 /// Recent Chrome versions as (major, full) pairs.
 const CHROME_VERSIONS: &[(&str, &str)] = &[
@@ -130,7 +142,7 @@ pub fn random_user_agent() -> String {
 }
 
 /// Browser fingerprint data — a single coherent identity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fingerprint {
     /// Full User-Agent string.
     pub user_agent: String,
@@ -160,10 +172,13 @@ pub struct Fingerprint {
     pub webgl_vendor: String,
     /// Spoofed WebGL unmasked renderer.
     pub webgl_renderer: String,
+    /// Stable canvas/audio perturbation seed for this identity.
+    #[serde(default = "random_noise_seed")]
+    pub noise_seed: u32,
 }
 
 /// Operating system platform for a fingerprint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Platform {
     /// macOS.
     MacOS,
@@ -209,6 +224,7 @@ impl Fingerprint {
             languages: vec!["en-US".to_string(), "en".to_string()],
             webgl_vendor: webgl_vendor.to_string(),
             webgl_renderer,
+            noise_seed: random_noise_seed(),
         }
     }
 
@@ -257,6 +273,55 @@ impl Fingerprint {
         fp
     }
 
+    /// Resolves an identity for a browser profile, storing it beside the
+    /// profile on first use. Explicit UA/timezone values are allowed only when
+    /// they agree with an existing identity; silently changing either would
+    /// defeat the point of a durable profile.
+    pub fn resolve_for_profile(
+        user_agent: Option<&str>,
+        timezone: Option<&str>,
+        profile_dir: Option<&Path>,
+    ) -> io::Result<Self> {
+        let Some(profile_dir) = profile_dir else {
+            return Ok(Self::resolve(user_agent, timezone));
+        };
+
+        let path = profile_dir.join(PERSISTED_FINGERPRINT_FILE);
+        if path.exists() {
+            let contents = fs::read(&path)?;
+            let fingerprint: Self = serde_json::from_slice(&contents).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid persisted browser identity {}: {error}", path.display()),
+                )
+            })?;
+            if let Some(user_agent) = user_agent {
+                if user_agent != fingerprint.user_agent {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "configured user agent conflicts with persisted browser identity",
+                    ));
+                }
+            }
+            if let Some(timezone) = timezone {
+                if timezone != fingerprint.timezone {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "configured timezone conflicts with persisted browser identity",
+                    ));
+                }
+            }
+            return Ok(fingerprint);
+        }
+
+        let fingerprint = Self::resolve(user_agent, timezone);
+        let temporary = profile_dir.join(format!("{PERSISTED_FINGERPRINT_FILE}.tmp-{}", std::process::id()));
+        let encoded = serde_json::to_vec_pretty(&fingerprint).map_err(io::Error::other)?;
+        fs::write(&temporary, encoded)?;
+        fs::rename(temporary, path)?;
+        Ok(fingerprint)
+    }
+
     /// `navigator.platform` value consistent with this fingerprint.
     pub fn nav_platform(&self) -> &'static str {
         match self.platform {
@@ -296,6 +361,10 @@ impl Fingerprint {
             ("Not?A_Brand".to_string(), "24.0.0.0".to_string()),
         ]
     }
+}
+
+fn random_noise_seed() -> u32 {
+    fastrand::u32(1..=u32::MAX)
 }
 
 fn native_platform() -> Platform {
@@ -383,6 +452,39 @@ mod tests {
         let ua = Fingerprint::native_chrome_user_agent("150.0.7871.182").unwrap();
         assert!(ua.contains("Chrome/150.0.7871.182"));
         assert!(Fingerprint::native_chrome_user_agent("not-a-version").is_none());
+    }
+
+    #[test]
+    fn test_profile_identity_is_stable_across_launches() {
+        let dir = std::env::temp_dir().join(format!(
+            "eoka-fingerprint-test-{}-{}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = Fingerprint::resolve_for_profile(None, Some("America/Los_Angeles"), Some(&dir))
+            .unwrap();
+        let second = Fingerprint::resolve_for_profile(None, Some("America/Los_Angeles"), Some(&dir))
+            .unwrap();
+        assert_eq!(first.user_agent, second.user_agent);
+        assert_eq!(first.hardware_concurrency, second.hardware_concurrency);
+        assert_eq!(first.device_memory, second.device_memory);
+        assert_eq!(first.webgl_renderer, second.webgl_renderer);
+        assert_eq!(first.noise_seed, second.noise_seed);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_profile_identity_rejects_conflicting_user_agent() {
+        let dir = std::env::temp_dir().join(format!(
+            "eoka-fingerprint-test-{}-{}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Fingerprint::resolve_for_profile(Some("Mozilla/5.0 first"), None, Some(&dir)).unwrap();
+        assert!(Fingerprint::resolve_for_profile(Some("Mozilla/5.0 second"), None, Some(&dir)).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     // Over many samples, every random fingerprint must be internally coherent:

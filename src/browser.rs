@@ -168,17 +168,26 @@ impl Browser {
     pub async fn launch_with_config(config: StealthConfig) -> Result<Self> {
         let config = Arc::new(config);
 
-        // Create unique user data directory
-        let instance_id = BROWSER_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let user_data_dir = std::env::temp_dir().join(format!(
-            "eoka-browser-{}-{}",
-            std::process::id(),
-            instance_id
-        ));
-
-        // Clean up any stale data
-        let _ = std::fs::remove_dir_all(&user_data_dir);
-        std::fs::create_dir_all(&user_data_dir)?;
+        // Ephemeral calls use a disposable profile. A caller-provided profile
+        // is durable and must never be wiped by Eoka.
+        let (user_data_dir, owns_user_data_dir) = match config.user_data_dir.as_deref() {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                std::fs::create_dir_all(&path)?;
+                (path, false)
+            }
+            None => {
+                let instance_id = BROWSER_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "eoka-browser-{}-{}",
+                    std::process::id(),
+                    instance_id
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                std::fs::create_dir_all(&path)?;
+                (path, true)
+            }
+        };
 
         // Clean up the temp user-data-dir on any failure past this point.
         let launch = async {
@@ -187,7 +196,10 @@ impl Browser {
                 None => find_chrome()?,
             };
 
-            let chrome_path = if config.patch_binary {
+            // Patching a browser binary is not appropriate for a durable
+            // user-owned profile. Keep that mode close to normal Chromium and
+            // let its profile provide continuity instead of fresh spoofing.
+            let chrome_path = if config.patch_binary && owns_user_data_dir {
                 ChromePatcher::new(&chrome_path)?.get_patched_path()?
             } else {
                 chrome_path
@@ -198,13 +210,14 @@ impl Browser {
             } else {
                 None
             };
-            let fingerprint = Fingerprint::resolve(
+            let fingerprint = Fingerprint::resolve_for_profile(
                 config
                     .user_agent
                     .as_deref()
                     .or(detected_user_agent.as_deref()),
                 config.timezone.as_deref(),
-            );
+                (!owns_user_data_dir).then_some(user_data_dir.as_path()),
+            )?;
 
             // Build args
             let mut args = stealth_args(&config, &fingerprint);
@@ -231,7 +244,9 @@ impl Browser {
         let (connection, fingerprint) = match launch {
             Ok(result) => result,
             Err(e) => {
-                let _ = std::fs::remove_dir_all(&user_data_dir);
+                if owns_user_data_dir {
+                    let _ = std::fs::remove_dir_all(&user_data_dir);
+                }
                 return Err(e);
             }
         };
@@ -241,7 +256,7 @@ impl Browser {
         Ok(Self {
             connection,
             config,
-            user_data_dir: Some(user_data_dir),
+            user_data_dir: owns_user_data_dir.then_some(user_data_dir),
             fingerprint: Some(fingerprint),
             evasion_script,
         })

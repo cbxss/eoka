@@ -6,6 +6,9 @@ on:
     paths:
       - "Cargo.toml"
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -16,7 +19,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
 
@@ -47,7 +50,7 @@ jobs:
 
       - name: Install Rust
         if: steps.check.outputs.exists == 'false'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Publish to crates.io
         if: steps.check.outputs.exists == 'false'

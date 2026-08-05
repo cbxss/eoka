@@ -234,6 +234,16 @@ impl Session {
             .await
     }
 
+    /// Switch JS execution off/on for the current page.
+    /// Must be called before navigation to take effect.
+    pub(crate) async fn set_script_execution_disabled(&self, disabled: bool) -> Result<()> {
+        self.send_void(
+            "Emulation.setScriptExecutionDisabled",
+            &EmulationSetScriptExecutionDisabled { value: disabled },
+        )
+        .await
+    }
+
     /// Override the User-Agent string (and optionally Accept-Language).
     pub(crate) async fn set_user_agent(
         &self,

@@ -808,6 +808,12 @@ impl Page {
         self.session.set_bypass_csp(enabled).await
     }
 
+    /// Enable or disable JavaScript execution for the current page.
+    /// Must be called before navigation to take effect.
+    pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<()> {
+        self.session.set_script_execution_disabled(!enabled).await
+    }
+
     /// Override the User-Agent string for this page.
     pub async fn set_user_agent(&self, user_agent: &str) -> Result<()> {
         self.session.set_user_agent(user_agent, None).await

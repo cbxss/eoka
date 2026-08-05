@@ -238,6 +238,7 @@ page.disable_request_capture().await?;
 
 ```rust
 page.set_bypass_csp(true).await?;           // disable CSP
+page.set_javascript_enabled(false).await?;  // disable JS entirely (before navigation)
 page.set_user_agent("custom UA").await?;
 page.ignore_cert_errors(true).await?;
 page.accept_dialog(None).await?;            // accept alert/confirm

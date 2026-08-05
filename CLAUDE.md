@@ -154,6 +154,7 @@ src/
 
 ### Page - Configuration
 - `page.set_bypass_csp(enabled)` - Disable CSP enforcement
+- `page.set_javascript_enabled(enabled)` - Enable/disable JS execution (must be called before navigation)
 - `page.set_user_agent(ua)` - Override User-Agent
 - `page.ignore_cert_errors(ignore)` - Skip TLS verification
 

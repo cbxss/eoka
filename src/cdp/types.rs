@@ -745,6 +745,13 @@ pub struct PageSetBypassCSP {
     pub enabled: bool,
 }
 
+/// Emulation.setScriptExecutionDisabled — switch JS execution off/on for the page
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmulationSetScriptExecutionDisabled {
+    pub value: bool,
+}
+
 /// A single (brand, version) entry in `Sec-CH-UA` client-hint brand lists.
 #[derive(Debug, Clone, Serialize)]
 pub struct UserAgentBrandVersion {

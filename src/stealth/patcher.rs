@@ -147,6 +147,13 @@ fn create_dir_secure(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result.map_err(Into::into),
+    }
+}
+
 /// Find Chrome binary on the system
 pub fn find_chrome() -> Result<PathBuf> {
     let candidates = if cfg!(target_os = "macos") {
@@ -589,7 +596,7 @@ impl ChromePatcher {
                 .write(true)
                 .open(&self.patched_path)?
         } else {
-            let _ = fs::remove_file(&self.patched_path);
+            remove_file_if_exists(&self.patched_path)?;
             let mut dst = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -633,7 +640,7 @@ impl ChromePatcher {
             create_dir_secure(parent)?;
         }
 
-        let _ = fs::remove_file(&self.patched_path);
+        remove_file_if_exists(&self.patched_path)?;
         let mut out_file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -714,9 +721,21 @@ impl ChromePatcher {
             .to_str()
             .ok_or_else(|| Error::patching("codesign", "Invalid UTF-8 in sign path"))?;
 
-        let _ = Command::new("codesign")
+        match Command::new("codesign")
             .args(["--remove-signature", sign_str])
-            .output();
+            .output()
+        {
+            Ok(output) if !output.status.success() => {
+                tracing::debug!(
+                    "Existing Chrome signature was not removed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(error) => {
+                tracing::debug!("Could not remove existing Chrome signature: {}", error);
+            }
+            Ok(_) => {}
+        }
 
         let output = Command::new("codesign")
             .args(["-s", "-", "-f", "--deep", "--no-strict", sign_str])

@@ -3,10 +3,12 @@
 //! High-level API for interacting with a browser page.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 use crate::cdp::{MouseButton, MouseEventType, Session};
 use crate::error::{Error, Result};
+use crate::fetch::{BrowserFetchOutcome, BrowserFetchRequest, BrowserFetchResponse};
 use crate::keyboard::{key_to_codes, parse_key_combo};
 use crate::session::{BrowserState, SessionCookie};
 use crate::stealth::Human;
@@ -75,9 +77,46 @@ fn is_element_cdp_error(e: &Error) -> bool {
                 || is_missing_node_message(message)
                 || message.contains("Node is not an element")
         }
-        _ => false,
+        Error::Launch(_)
+        | Error::Transport { .. }
+        | Error::Navigation(_)
+        | Error::Timeout(_)
+        | Error::Serialization(_)
+        | Error::Decode(_)
+        | Error::Io(_)
+        | Error::ChromeNotFound
+        | Error::Patching { .. }
+        | Error::RetryExhausted { .. } => false,
     }
 }
+
+/// Convert a missing-element result into a polling miss while preserving
+/// operational failures such as a closed transport or malformed CDP reply.
+fn retry_if_not_found<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(Error::ElementNotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Preserve the primary operation error when both an operation and its
+/// mandatory cleanup fail. A cleanup-only failure must still reach the caller.
+fn finish_temporary_headers<T>(operation: Result<T>, cleanup: Result<()>) -> Result<T> {
+    match (operation, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(operation_error), Err(cleanup_error)) => {
+            tracing::error!(
+                "Failed to clear temporary HTTP headers after navigation error: {}",
+                cleanup_error
+            );
+            Err(operation_error)
+        }
+    }
+}
+
 /// Text matching strategy for find_by_text operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextMatch {
@@ -99,8 +138,9 @@ pub struct Page {
     pub(crate) session: Session,
     config: Arc<StealthConfig>,
     /// Cached root `DOM.getDocument` node id (invalidated on navigation).
-    /// `Arc` so `Element` clones share one page's cache.
-    root_node: Arc<std::sync::Mutex<Option<i32>>>,
+    /// CDP node IDs are positive, so zero represents an empty cache. Fetching
+    /// twice during a race is harmless and avoids a poisonable lock.
+    root_node: Arc<AtomicI32>,
     /// Randomized per-page property key for the network-idle request counter.
     net_idle_key: String,
 }
@@ -112,24 +152,25 @@ impl Page {
         Self {
             session,
             config,
-            root_node: Arc::new(std::sync::Mutex::new(None)),
+            root_node: Arc::new(AtomicI32::new(0)),
             net_idle_key,
         }
     }
 
     /// Return the cached root document node id, fetching it once if needed.
     async fn document_node(&self) -> Result<i32> {
-        if let Some(id) = *self.root_node.lock().unwrap() {
+        let id = self.root_node.load(Ordering::Acquire);
+        if id != 0 {
             return Ok(id);
         }
         let doc = self.session.get_document(Some(0)).await?;
-        *self.root_node.lock().unwrap() = Some(doc.node_id);
+        self.root_node.store(doc.node_id, Ordering::Release);
         Ok(doc.node_id)
     }
 
     /// Drop the cached document node (call after navigation).
     fn invalidate_document(&self) {
-        *self.root_node.lock().unwrap() = None;
+        self.root_node.store(0, Ordering::Release);
     }
 
     /// Run an operation against the cached document node, retrying once if stale.
@@ -614,6 +655,24 @@ impl Page {
         self.eval_impl(self.session.evaluate_sync(expression).await?)
     }
 
+    /// Fetch a URL from inside the page context.
+    pub async fn fetch(&self, request: BrowserFetchRequest) -> Result<BrowserFetchResponse> {
+        let script = crate::fetch::fetch_script(&request)?;
+        self.evaluate(&script).await
+    }
+
+    /// Fetch multiple URLs from inside the page context.
+    pub async fn fetch_many(
+        &self,
+        requests: Vec<BrowserFetchRequest>,
+    ) -> Result<Vec<BrowserFetchOutcome>> {
+        if requests.len() > 100 {
+            return Err(Error::cdp_msg("fetch_many accepts at most 100 requests"));
+        }
+        let script = crate::fetch::fetch_many_script(&requests)?;
+        self.evaluate(&script).await
+    }
+
     /// Shared impl: check for exceptions and extract the value
     fn eval_impl<T: serde::de::DeserializeOwned>(
         &self,
@@ -779,9 +838,9 @@ impl Page {
         headers: HashMap<String, String>,
     ) -> Result<()> {
         self.session.set_extra_headers(headers).await?;
-        let result = self.goto(url).await;
-        let _ = self.session.clear_extra_headers().await;
-        result
+        let navigation = self.goto(url).await;
+        let cleanup = self.session.clear_extra_headers().await;
+        finish_temporary_headers(navigation, cleanup)
     }
 
     /// Navigate to `url` with a custom Referer header.
@@ -836,17 +895,17 @@ impl Page {
     }
 
     /// Generic polling helper — calls `check` every `POLL_INTERVAL_MS` until it
-    /// returns `Ok(Some(value))`, then returns that value.  Returns `Err(Timeout)`
-    /// if `timeout_ms` elapses first.
+    /// returns `Ok(Some(value))`, then returns that value. Operational errors
+    /// propagate immediately; `Ok(None)` retries until the timeout.
     async fn poll_until<T, F, Fut>(&self, timeout_ms: u64, error_msg: String, check: F) -> Result<T>
     where
         F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Option<T>>,
+        Fut: std::future::Future<Output = Result<Option<T>>>,
     {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_millis(timeout_ms);
         loop {
-            if let Some(val) = check().await {
+            if let Some(val) = check().await? {
                 return Ok(val);
             }
             if start.elapsed() > timeout {
@@ -861,7 +920,7 @@ impl Page {
         self.poll_until(
             timeout_ms,
             format!("Element '{}' not found within {}ms", selector, timeout_ms),
-            || async { self.find(selector).await.ok() },
+            || async { retry_if_not_found(self.find(selector).await) },
         )
         .await
     }
@@ -872,12 +931,14 @@ impl Page {
             timeout_ms,
             format!("Element '{}' not visible within {}ms", selector, timeout_ms),
             || async {
-                if let Ok(elem) = self.find(selector).await {
-                    if elem.center().await.is_ok() {
-                        return Some(elem);
-                    }
+                let Some(element) = retry_if_not_found(self.find(selector).await)? else {
+                    return Ok(None);
+                };
+                match element.center().await {
+                    Ok(_) => Ok(Some(element)),
+                    Err(error) if is_element_cdp_error(&error) => Ok(None),
+                    Err(error) => Err(error),
                 }
-                None
             },
         )
         .await
@@ -893,12 +954,14 @@ impl Page {
             ),
             || async {
                 match self.find(selector).await {
-                    Err(Error::ElementNotFound(_)) => Some(()),
+                    Err(Error::ElementNotFound(_)) => Ok(Some(())),
                     Ok(el) => match el.is_visible().await {
-                        Ok(false) => Some(()),
-                        _ => None,
+                        Ok(false) => Ok(Some(())),
+                        Ok(true) => Ok(None),
+                        Err(error) if is_element_cdp_error(&error) => Ok(Some(())),
+                        Err(error) => Err(error),
                     },
-                    Err(_) => None,
+                    Err(error) => Err(error),
                 }
             },
         )
@@ -918,7 +981,7 @@ impl Page {
                 "Element with text '{}' not found within {}ms",
                 text, timeout_ms
             ),
-            || async { self.find_by_text(text).await.ok() },
+            || async { retry_if_not_found(self.find_by_text(text).await) },
         )
         .await
     }
@@ -929,12 +992,8 @@ impl Page {
             timeout_ms,
             format!("URL did not contain '{}' within {}ms", pattern, timeout_ms),
             || async {
-                if let Ok(url) = self.url().await {
-                    if url.contains(pattern) {
-                        return Some(());
-                    }
-                }
-                None
+                let url = self.url().await?;
+                Ok(url.contains(pattern).then_some(()))
             },
         )
         .await
@@ -950,12 +1009,8 @@ impl Page {
                 original_url, timeout_ms
             ),
             || async {
-                if let Ok(url) = self.url().await {
-                    if url != original_url {
-                        return Some(url);
-                    }
-                }
-                None
+                let url = self.url().await?;
+                Ok((url != original_url).then_some(url))
             },
         )
         .await
@@ -989,8 +1044,10 @@ impl Page {
     /// Find the first element matching any of the given selectors
     pub async fn find_any(&self, selectors: &[&str]) -> Result<Element> {
         for selector in selectors {
-            if let Ok(element) = self.find(selector).await {
-                return Ok(element);
+            match self.find(selector).await {
+                Ok(element) => return Ok(element),
+                Err(Error::ElementNotFound(_)) => {}
+                Err(error) => return Err(error),
             }
         }
         Err(Error::ElementNotFound(format!(
@@ -1009,7 +1066,7 @@ impl Page {
                 "None of selectors found within {}ms: {:?}",
                 timeout_ms, selectors
             ),
-            || async { self.find_any(selectors).await.ok() },
+            || async { retry_if_not_found(self.find_any(selectors).await) },
         )
         .await
     }
@@ -1056,7 +1113,7 @@ impl Page {
         let mut idle_start: Option<std::time::Instant> = None;
 
         loop {
-            let pending: i32 = self.evaluate_sync(&check_idle_js).await.unwrap_or(-1);
+            let pending: i32 = self.evaluate_sync(&check_idle_js).await?;
 
             if pending == 0 {
                 match idle_start {
@@ -1376,7 +1433,7 @@ pub enum ResponseBody {
 }
 
 impl ResponseBody {
-    /// Get as text (panics if binary)
+    /// Get as text, or `None` for a binary response.
     pub fn as_text(&self) -> Option<&str> {
         match self {
             ResponseBody::Text(s) => Some(s),
@@ -1496,5 +1553,33 @@ mod tests {
         assert!(is_missing_node_message("Could not find node with given id"));
         assert!(is_missing_node_message("No node with given id found"));
         assert!(!is_missing_node_message("box model could not be computed"));
+    }
+
+    #[test]
+    fn test_retry_if_not_found_only_retries_absence() {
+        assert!(matches!(retry_if_not_found::<()>(Ok(())), Ok(Some(()))));
+        assert!(matches!(
+            retry_if_not_found::<()>(Err(Error::ElementNotFound("missing".into()))),
+            Ok(None)
+        ));
+        assert!(matches!(
+            retry_if_not_found::<()>(Err(Error::transport("disconnected"))),
+            Err(Error::Transport { .. })
+        ));
+    }
+
+    #[test]
+    fn test_temporary_header_cleanup_error_reaches_caller() {
+        let result = finish_temporary_headers(Ok(()), Err(Error::transport("cleanup failed")));
+        assert!(matches!(result, Err(Error::Transport { .. })));
+    }
+
+    #[test]
+    fn test_navigation_error_wins_when_header_cleanup_also_fails() {
+        let result = finish_temporary_headers::<()>(
+            Err(Error::Navigation("navigation failed".into())),
+            Err(Error::transport("cleanup failed")),
+        );
+        assert!(matches!(result, Err(Error::Navigation(_))));
     }
 }

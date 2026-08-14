@@ -36,6 +36,75 @@ type PendingMap = std::sync::Mutex<HashMap<u64, PendingRequest>>;
 /// A pending request waiting for a response
 type PendingRequest = oneshot::Sender<Result<Value>>;
 
+/// Recover a poisoned pending-request map. Its critical sections only mutate
+/// `HashMap` entries, whose memory invariants remain intact during unwinding.
+fn lock_pending(pending: &PendingMap) -> std::sync::MutexGuard<'_, HashMap<u64, PendingRequest>> {
+    match pending.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!("Pending CDP request map was poisoned; recovering its contents");
+            poisoned.into_inner()
+        }
+    }
+}
+
+/// Fail and remove every pending request, returning the number drained.
+fn fail_pending(pending: &PendingMap, context: &str) -> usize {
+    let mut requests = lock_pending(pending);
+    let count = requests.len();
+    for (_id, sender) in requests.drain() {
+        drop(sender.send(Err(Error::transport(context))));
+    }
+    count
+}
+
+/// Terminate and reap a managed Chrome child without treating an already
+/// exited process as an error.
+fn stop_child(child: &mut Child) -> std::io::Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+
+    if let Err(kill_error) = child.kill() {
+        if child.try_wait()?.is_none() {
+            return Err(kill_error);
+        }
+        return Ok(());
+    }
+
+    child.wait()?;
+    Ok(())
+}
+
+/// Own a Chrome child until it is handed to `Transport`. If the async
+/// WebSocket connection future is cancelled, dropping this guard still kills
+/// and reaps the process.
+struct ChildCleanupGuard {
+    child: Option<Child>,
+}
+
+impl ChildCleanupGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn take(&mut self) -> Result<Child> {
+        self.child
+            .take()
+            .ok_or_else(|| Error::transport("Chrome child ownership was already transferred"))
+    }
+}
+
+impl Drop for ChildCleanupGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            if let Err(error) = stop_child(&mut child) {
+                tracing::warn!("Failed to clean up an unclaimed Chrome child: {}", error);
+            }
+        }
+    }
+}
+
 /// Broadcast capacity for CDP events (multi-consumer, lag observable).
 const EVENT_CHANNEL_CAP: usize = 1024;
 
@@ -179,22 +248,15 @@ impl Transport {
 
     /// Create a new transport with proxy auth and configurable CDP timeout.
     pub async fn new_with_options(
-        mut child: Child,
+        child: Child,
         ws_url: &str,
         proxy_auth: Option<(String, String)>,
         cdp_timeout_secs: u64,
     ) -> Result<Self> {
-        // Kill the child if the connect fails, so it can't orphan Chrome.
-        let stream = match Self::ws_connect(ws_url).await {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e);
-            }
-        };
+        let mut child = ChildCleanupGuard::new(child);
+        let stream = Self::ws_connect(ws_url).await?;
         Ok(Self::build(
-            Some(child),
+            Some(child.take()?),
             stream,
             proxy_auth,
             cdp_timeout_secs,
@@ -252,7 +314,11 @@ impl Transport {
                 Some(Ok(Message::Ping(payload))) => {
                     // Split streams don't auto-pong; reply via the shared sink.
                     let mut w = writer.lock().await;
-                    let _ = w.send(Message::Pong(payload)).await;
+                    if let Err(error) = w.send(Message::Pong(payload)).await {
+                        exit_reason = format!("WebSocket pong write failed: {}", error);
+                        tracing::debug!("{}", exit_reason);
+                        break;
+                    }
                     continue;
                 }
                 Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => continue,
@@ -298,9 +364,9 @@ impl Transport {
                     Ok(msg.get("result").cloned().unwrap_or(json!({})))
                 };
 
-                let mut pending_guard = pending.lock().unwrap();
+                let mut pending_guard = lock_pending(&pending);
                 if let Some(sender) = pending_guard.remove(&id) {
-                    let _ = sender.send(result);
+                    drop(sender.send(result));
                 } else {
                     tracing::trace!("Response for unknown id: {}", id);
                 }
@@ -353,30 +419,24 @@ impl Transport {
                 }
 
                 // Publish event; ignore "no active receivers" errors.
-                let _ = event_tx.send(CdpMessage::Event {
+                drop(event_tx.send(CdpMessage::Event {
                     method: method.to_string(),
                     params,
                     session_id,
-                });
+                }));
             }
         }
 
         // Drain all pending requests so callers fail immediately instead of
         // hanging until the per-command timeout fires.
-        let mut pending_guard = pending.lock().unwrap();
-        let n = pending_guard.len();
+        let context = format!("WebSocket connection lost: {}", exit_reason);
+        let n = fail_pending(&pending, &context);
         if n > 0 {
             tracing::error!(
                 "Reader loop exiting ({}), failing {} pending request(s)",
                 exit_reason,
                 n
             );
-            for (_id, sender) in pending_guard.drain() {
-                let _ = sender.send(Err(Error::transport(format!(
-                    "WebSocket connection lost: {}",
-                    exit_reason
-                ))));
-            }
         }
         tracing::debug!("CDP reader loop ended ({})", exit_reason);
     }
@@ -425,7 +485,7 @@ impl Transport {
         // Create response channel and register it
         let (tx, rx) = oneshot::channel();
         {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = lock_pending(&self.pending);
             pending.insert(id, tx);
         }
 
@@ -434,7 +494,7 @@ impl Transport {
             let mut writer = self.writer.lock().await;
             writer.send(Message::Text(data.into())).await
         } {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = lock_pending(&self.pending);
             pending.remove(&id);
             return Err(Error::transport(format!("WebSocket write failed: {}", e)));
         }
@@ -444,9 +504,9 @@ impl Transport {
         // Wait for response with timeout to prevent deadlock if reader dies
         let result = tokio::time::timeout(self.cmd_timeout, rx)
             .await
-            .map_err(|_| {
+            .map_err(|elapsed| {
                 // Remove the pending request so the reader doesn't try to send to a dropped channel
-                let mut pending = self.pending.lock().unwrap();
+                let mut pending = lock_pending(&self.pending);
                 pending.remove(&id);
                 tracing::warn!(
                     "CDP command '{}' timed out after {}s (id={})",
@@ -455,13 +515,14 @@ impl Transport {
                     id
                 );
                 Error::transport(format!(
-                    "CDP command '{}' timed out after {}s (id={})",
+                    "CDP command '{}' timed out after {}s (id={}): {}",
                     method,
                     self.cmd_timeout.as_secs(),
-                    id
+                    id,
+                    elapsed
                 ))
             })?
-            .map_err(|_| Error::transport("Response channel closed"))??;
+            .map_err(|error| Error::transport(format!("Response channel closed: {}", error)))??;
 
         let response: R = serde_json::from_value(result)?;
         Ok(response)
@@ -532,13 +593,19 @@ impl Transport {
         // Send a WebSocket close frame (best-effort).
         {
             let mut writer = self.writer.lock().await;
-            let _ = writer.send(Message::Close(None)).await;
+            if let Err(error) = writer.send(Message::Close(None)).await {
+                tracing::debug!("WebSocket close frame was not sent: {}", error);
+            }
         }
+
+        if let Some(handle) = &self.reader_handle {
+            handle.abort();
+        }
+        fail_pending(&self.pending, "CDP transport closed");
 
         if let Some(ref child) = self.child {
             let mut c = child.lock().await;
-            let _ = c.kill();
-            let _ = c.wait();
+            stop_child(&mut c)?;
         }
         Ok(())
     }
@@ -546,11 +613,16 @@ impl Transport {
 
 impl Drop for Transport {
     fn drop(&mut self) {
+        if let Some(handle) = self.reader_handle.take() {
+            handle.abort();
+        }
+        fail_pending(&self.pending, "CDP transport dropped");
+
         if let Some(ref child) = self.child {
             if let Ok(mut c) = child.try_lock() {
-                let _ = c.kill();
-                // Reap to avoid a zombie.
-                let _ = c.wait();
+                if let Err(error) = stop_child(&mut c) {
+                    tracing::warn!("Failed to stop Chrome while dropping transport: {}", error);
+                }
             }
         }
     }
@@ -591,7 +663,9 @@ pub fn launch_chrome(path: &std::path::Path, args: &[String]) -> Result<(Child, 
 
             if line.contains("DevTools listening on") {
                 if let Some(url_start) = line.find("ws://") {
-                    let _ = tx.send(line[url_start..].trim().to_string());
+                    if tx.send(line[url_start..].trim().to_string()).is_err() {
+                        tracing::debug!("Chrome launch receiver dropped before URL delivery");
+                    }
                     return;
                 }
             }
@@ -600,13 +674,18 @@ pub fn launch_chrome(path: &std::path::Path, args: &[String]) -> Result<(Child, 
 
     let ws_url = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(url) => url,
-        Err(_) => {
+        Err(channel_error) => {
             // Kill Chrome so a missing DevTools URL can't orphan it.
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Error::Launch(
-                "Timed out waiting for Chrome DevTools URL (30s)".into(),
-            ));
+            if let Err(cleanup_error) = stop_child(&mut child) {
+                tracing::warn!(
+                    "Failed to clean up Chrome after launch-channel error: {}",
+                    cleanup_error
+                );
+            }
+            return Err(Error::Launch(format!(
+                "Failed waiting for Chrome DevTools URL: {}",
+                channel_error
+            )));
         }
     };
 

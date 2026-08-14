@@ -2,8 +2,8 @@
 //!
 //! Handles Chrome discovery, launching with stealth flags, and binary patching.
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -18,6 +18,21 @@ use crate::page::Page;
 use crate::stealth::fingerprint::Fingerprint;
 use crate::stealth::{build_evasion_script_for, find_chrome, ChromePatcher};
 use crate::StealthConfig;
+
+fn remove_dir_if_exists(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+async fn discover_browser_ws(port: u16) -> Result<String> {
+    tokio::task::spawn_blocking(move || {
+        crate::cdp::discover::discover_browser_ws("127.0.0.1", port)
+    })
+    .await
+    .map_err(|error| Error::transport(format!("Browser discovery worker failed: {}", error)))?
+}
 
 /// Stealth browser arguments (pre-built for zero allocation).
 fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String> {
@@ -83,6 +98,130 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
     }
 
     args
+}
+
+fn stop_unclaimed_child(child: &mut Child) -> std::io::Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    if let Err(kill_error) = child.kill() {
+        if child.try_wait()?.is_none() {
+            return Err(kill_error);
+        }
+        return Ok(());
+    }
+    child.wait()?;
+    Ok(())
+}
+
+/// Own a browser profile until launch fully succeeds. This makes cancellation
+/// of `launch_with_config` clean up ephemeral profiles automatically.
+struct BrowserProfileGuard {
+    path: PathBuf,
+    owned: bool,
+}
+
+impl BrowserProfileGuard {
+    fn create(config: &StealthConfig) -> Result<Self> {
+        match config.user_data_dir.as_deref() {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                std::fs::create_dir_all(&path)?;
+                Ok(Self { path, owned: false })
+            }
+            None => {
+                let instance_id = BROWSER_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "eoka-browser-{}-{}",
+                    std::process::id(),
+                    instance_id
+                ));
+                remove_dir_if_exists(&path)?;
+                std::fs::create_dir_all(&path)?;
+                Ok(Self { path, owned: true })
+            }
+        }
+    }
+
+    fn browser_owned_path(&mut self) -> Option<PathBuf> {
+        if self.owned {
+            self.owned = false;
+            Some(self.path.clone())
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for BrowserProfileGuard {
+    fn drop(&mut self) {
+        if self.owned {
+            if let Err(error) = remove_dir_if_exists(&self.path) {
+                tracing::warn!("Failed to remove unclaimed browser profile: {}", error);
+            }
+        }
+    }
+}
+
+/// Result of synchronous browser preparation. Until the child is transferred
+/// to `Transport`, dropping this value kills Chrome and reclaims its profile.
+struct PreparedBrowserLaunch {
+    child: Option<Child>,
+    ws_url: String,
+    fingerprint: Option<Fingerprint>,
+    profile: BrowserProfileGuard,
+}
+
+impl Drop for PreparedBrowserLaunch {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            if let Err(error) = stop_unclaimed_child(&mut child) {
+                tracing::warn!("Failed to clean up unclaimed Chrome launch: {}", error);
+            }
+        }
+    }
+}
+
+fn prepare_browser_launch(config: Arc<StealthConfig>) -> Result<PreparedBrowserLaunch> {
+    let profile = BrowserProfileGuard::create(&config)?;
+    let chrome_path = match &config.chrome_path {
+        Some(path) => PathBuf::from(path),
+        None => find_chrome()?,
+    };
+
+    // Patching a browser binary is not appropriate for a durable user-owned
+    // profile. Let that profile provide continuity instead of fresh spoofing.
+    let chrome_path = if config.patch_binary && profile.owned {
+        ChromePatcher::new(&chrome_path)?.get_patched_path()?
+    } else {
+        chrome_path
+    };
+
+    let detected_user_agent = if config.user_agent.is_none() {
+        installed_chrome_user_agent(&chrome_path)
+    } else {
+        None
+    };
+    let fingerprint = Fingerprint::resolve_for_profile(
+        config
+            .user_agent
+            .as_deref()
+            .or(detected_user_agent.as_deref()),
+        config.timezone.as_deref(),
+        (!profile.owned).then_some(profile.path.as_path()),
+    )?;
+
+    let mut args = stealth_args(&config, &fingerprint);
+    args.push(format!("--user-data-dir={}", profile.path.display()));
+
+    tracing::info!("Launching Chrome from {:?}", chrome_path);
+    let (child, ws_url) = launch_chrome(&chrome_path, &args)?;
+    Ok(PreparedBrowserLaunch {
+        child: Some(child),
+        ws_url,
+        fingerprint: Some(fingerprint),
+        profile,
+    })
 }
 
 /// Info about an open tab
@@ -167,96 +306,42 @@ impl Browser {
     /// Launch with custom config
     pub async fn launch_with_config(config: StealthConfig) -> Result<Self> {
         let config = Arc::new(config);
+        let launch_config = Arc::clone(&config);
+        let mut prepared =
+            tokio::task::spawn_blocking(move || prepare_browser_launch(launch_config))
+                .await
+                .map_err(|error| {
+                    Error::Launch(format!("Browser launch worker failed: {}", error))
+                })??;
 
-        // Ephemeral calls use a disposable profile. A caller-provided profile
-        // is durable and must never be wiped by Eoka.
-        let (user_data_dir, owns_user_data_dir) = match config.user_data_dir.as_deref() {
-            Some(path) => {
-                let path = PathBuf::from(path);
-                std::fs::create_dir_all(&path)?;
-                (path, false)
-            }
-            None => {
-                let instance_id = BROWSER_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let path = std::env::temp_dir().join(format!(
-                    "eoka-browser-{}-{}",
-                    std::process::id(),
-                    instance_id
-                ));
-                let _ = std::fs::remove_dir_all(&path);
-                std::fs::create_dir_all(&path)?;
-                (path, true)
-            }
+        let child = prepared
+            .child
+            .take()
+            .ok_or_else(|| Error::Launch("Browser launch lost its Chrome child".into()))?;
+        let proxy_auth = match (&config.proxy_username, &config.proxy_password) {
+            (Some(username), Some(password)) => Some((username.clone(), password.clone())),
+            _ => None,
         };
+        let transport =
+            Transport::new_with_options(child, &prepared.ws_url, proxy_auth, config.cdp_timeout)
+                .await?;
+        let connection = Connection::new(transport);
 
-        // Clean up the temp user-data-dir on any failure past this point.
-        let launch = async {
-            let chrome_path = match &config.chrome_path {
-                Some(p) => PathBuf::from(p),
-                None => find_chrome()?,
-            };
+        let version = connection.version().await?;
+        tracing::info!("Connected to Chrome: {}", version.product);
 
-            // Patching a browser binary is not appropriate for a durable
-            // user-owned profile. Keep that mode close to normal Chromium and
-            // let its profile provide continuity instead of fresh spoofing.
-            let chrome_path = if config.patch_binary && owns_user_data_dir {
-                ChromePatcher::new(&chrome_path)?.get_patched_path()?
-            } else {
-                chrome_path
-            };
-
-            let detected_user_agent = if config.user_agent.is_none() {
-                installed_chrome_user_agent(&chrome_path)
-            } else {
-                None
-            };
-            let fingerprint = Fingerprint::resolve_for_profile(
-                config
-                    .user_agent
-                    .as_deref()
-                    .or(detected_user_agent.as_deref()),
-                config.timezone.as_deref(),
-                (!owns_user_data_dir).then_some(user_data_dir.as_path()),
-            )?;
-
-            // Build args
-            let mut args = stealth_args(&config, &fingerprint);
-            args.push(format!("--user-data-dir={}", user_data_dir.display()));
-
-            tracing::info!("Launching Chrome from {:?}", chrome_path);
-            let (child, ws_url) = launch_chrome(&chrome_path, &args)?;
-
-            let proxy_auth = match (&config.proxy_username, &config.proxy_password) {
-                (Some(u), Some(p)) => Some((u.clone(), p.clone())),
-                _ => None,
-            };
-            let transport =
-                Transport::new_with_options(child, &ws_url, proxy_auth, config.cdp_timeout).await?;
-            let connection = Connection::new(transport);
-
-            let version = connection.version().await?;
-            tracing::info!("Connected to Chrome: {}", version.product);
-
-            Ok::<(Connection, Fingerprint), Error>((connection, fingerprint))
-        }
-        .await;
-
-        let (connection, fingerprint) = match launch {
-            Ok(result) => result,
-            Err(e) => {
-                if owns_user_data_dir {
-                    let _ = std::fs::remove_dir_all(&user_data_dir);
-                }
-                return Err(e);
-            }
-        };
+        let fingerprint = prepared
+            .fingerprint
+            .take()
+            .ok_or_else(|| Error::Launch("Browser launch lost its fingerprint".into()))?;
+        let user_data_dir = prepared.profile.browser_owned_path();
 
         let evasion_script = build_evasion_script_for(&config, &fingerprint);
 
         Ok(Self {
             connection,
             config,
-            user_data_dir: owns_user_data_dir.then_some(user_data_dir),
+            user_data_dir,
             fingerprint: Some(fingerprint),
             evasion_script,
         })
@@ -305,13 +390,13 @@ impl Browser {
     /// Discover the DevTools URL on `127.0.0.1:<port>` and connect.
     /// Equivalent to `curl http://127.0.0.1:<port>/json/version` then `Browser::connect`.
     pub async fn connect_port(port: u16) -> Result<Self> {
-        let ws_url = crate::cdp::discover::discover_browser_ws("127.0.0.1", port)?;
+        let ws_url = discover_browser_ws(port).await?;
         Self::connect(&ws_url).await
     }
 
     /// `connect_port` with a custom config.
     pub async fn connect_port_with_config(port: u16, config: StealthConfig) -> Result<Self> {
-        let ws_url = crate::cdp::discover::discover_browser_ws("127.0.0.1", port)?;
+        let ws_url = discover_browser_ws(port).await?;
         Self::connect_with_config(&ws_url, config).await
     }
 
@@ -424,7 +509,7 @@ impl Browser {
 
         // Clean up user data directory (None when connecting).
         if let Some(ref dir) = self.user_data_dir {
-            let _ = std::fs::remove_dir_all(dir);
+            remove_dir_if_exists(dir)?;
         }
 
         Ok(())
@@ -456,7 +541,12 @@ impl Drop for Browser {
     fn drop(&mut self) {
         // Best-effort cleanup of the temp user-data-dir if close() wasn't called.
         if let Some(ref dir) = self.user_data_dir {
-            let _ = std::fs::remove_dir_all(dir);
+            if let Err(error) = remove_dir_if_exists(dir) {
+                tracing::warn!(
+                    "Failed to remove temporary browser profile while dropping browser: {}",
+                    error
+                );
+            }
         }
     }
 }

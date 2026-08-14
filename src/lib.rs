@@ -66,6 +66,7 @@ pub mod browser;
 pub mod cdp;
 pub mod element;
 pub mod error;
+pub mod fetch;
 mod keyboard;
 pub mod network;
 pub mod page;
@@ -86,6 +87,7 @@ const _: () = {
 pub use browser::{Browser, TabInfo};
 pub use element::{BoundingBox, Element};
 pub use error::{Error, Result};
+pub use fetch::{BrowserFetchOutcome, BrowserFetchRequest, BrowserFetchResponse};
 pub use network::{NetworkEvent, NetworkWatcher};
 pub use page::{CapturedRequest, FrameInfo, Page, PageState, ResponseBody, TextMatch};
 pub use session::{BrowserSession, BrowserState, SessionCookie};

@@ -118,7 +118,11 @@ impl Connection {
 
     /// Close the browser
     pub(crate) async fn close(&self) -> Result<()> {
-        let _ = self.send_void("Browser.close", &BrowserClose {}).await;
+        if let Err(error) = self.send_void("Browser.close", &BrowserClose {}).await {
+            // Chrome may close the socket before acknowledging Browser.close.
+            // Transport::close still terminates and reaps managed Chrome.
+            tracing::debug!("Browser.close command did not complete: {}", error);
+        }
         self.transport.close().await
     }
 }

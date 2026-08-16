@@ -87,6 +87,11 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
         args.push("--headless=new".into());
     }
 
+    // Named profile within user_data_dir
+    if let Some(ref profile_dir) = config.profile_dir {
+        args.push(format!("--profile-directory={}", profile_dir));
+    }
+
     // Proxy
     if let Some(ref proxy) = config.proxy {
         args.push(format!("--proxy-server={}", proxy));
@@ -165,6 +170,8 @@ impl Drop for BrowserProfileGuard {
 
 /// Result of synchronous browser preparation. Until the child is transferred
 /// to `Transport`, dropping this value kills Chrome and reclaims its profile.
+/// `child` is `None` when we attached to an already-running Chrome instead
+/// of spawning one (see `try_attach_existing`).
 struct PreparedBrowserLaunch {
     child: Option<Child>,
     ws_url: String,
@@ -182,8 +189,99 @@ impl Drop for PreparedBrowserLaunch {
     }
 }
 
+/// Check whether a Chrome instance is already running on `profile_dir` and,
+/// if so, return the ws:// URL to attach to instead of spawning a second
+/// process. A second `--user-data-dir=<same dir>` launch would silently be
+/// handed off to the running instance over Chrome's `SingletonSocket` and
+/// exit without ever printing a DevTools URL, so this must run first.
+///
+/// Returns `Ok(None)` when there's nothing to attach to (no lock, a stale
+/// lock that was just cleared, or a platform where reuse detection isn't
+/// implemented) — the caller should spawn normally. Returns `Err` when a
+/// live instance exists but can't safely be attached to (headless/headed
+/// mismatch, no debug port, or an unresponsive port).
+fn try_attach_existing(profile_dir: &Path, want_headless: bool) -> Result<Option<String>> {
+    use crate::cdp::discover;
+
+    let Some(pid) = discover::read_singleton_lock(profile_dir) else {
+        return Ok(None);
+    };
+
+    if !discover::pid_is_alive(pid) {
+        // Stale lock left behind by a crashed/killed Chrome. Clear it so a
+        // normal spawn below can proceed, mirroring what Chrome itself does.
+        let _ = std::fs::remove_file(profile_dir.join("SingletonLock"));
+        return Ok(None);
+    }
+
+    // Check the cheap local signal before touching the network — a
+    // headless/headed mismatch always fails the attach, so there's no
+    // reason to round-trip to Chrome's DevTools port first.
+    if let Some(argv) = discover::read_process_argv(pid) {
+        let running_headless = argv.iter().any(|arg| arg.starts_with("--headless"));
+        if running_headless != want_headless {
+            let (running, requested) = if running_headless {
+                ("headless", "headed")
+            } else {
+                ("non-headless", "headless")
+            };
+            return Err(Error::Launch(format!(
+                "A {} Chrome instance (pid {}) is already running on profile {}; close it \
+                 before requesting {} mode, or drop that flag for this launch",
+                running,
+                pid,
+                profile_dir.display(),
+                requested
+            )));
+        }
+    }
+
+    let Some(port) = discover::read_devtools_active_port(profile_dir) else {
+        return Err(Error::Launch(format!(
+            "A Chrome instance (pid {}) is already running on profile {}, but it wasn't \
+             launched with a debug port; close it first or relaunch it with \
+             --remote-debugging-port",
+            pid,
+            profile_dir.display()
+        )));
+    };
+
+    let ws_url = discover::discover_browser_ws("127.0.0.1", port).map_err(|e| {
+        Error::Launch(format!(
+            "A Chrome instance (pid {}) is already running on profile {}, but its DevTools \
+             port {} isn't responding: {}",
+            pid,
+            profile_dir.display(),
+            port,
+            e
+        ))
+    })?;
+
+    Ok(Some(ws_url))
+}
+
 fn prepare_browser_launch(config: Arc<StealthConfig>) -> Result<PreparedBrowserLaunch> {
     let profile = BrowserProfileGuard::create(&config)?;
+
+    // Only a durable, user-owned profile can already have a live Chrome on
+    // it — ephemeral profiles are freshly created above and can't collide.
+    if !profile.owned {
+        if let Some(ws_url) = try_attach_existing(&profile.path, config.headless)? {
+            tracing::info!("Reusing running Chrome on profile {:?}", profile.path);
+            let fingerprint = Fingerprint::resolve_for_profile(
+                config.user_agent.as_deref(),
+                config.timezone.as_deref(),
+                Some(profile.path.as_path()),
+            )?;
+            return Ok(PreparedBrowserLaunch {
+                child: None,
+                ws_url,
+                fingerprint: Some(fingerprint),
+                profile,
+            });
+        }
+    }
+
     let chrome_path = match &config.chrome_path {
         Some(path) => PathBuf::from(path),
         None => find_chrome()?,
@@ -271,6 +369,10 @@ pub struct Browser {
     config: Arc<StealthConfig>,
     /// User data directory (cleaned up on close; None when connecting to existing instance)
     user_data_dir: Option<PathBuf>,
+    /// True when we attached to a Chrome we didn't spawn (see
+    /// `try_attach_existing`). `close()` must never send `Browser.close` to
+    /// a process we don't own, regardless of `config.live_session`.
+    reused: bool,
     /// Resolved fingerprint (None in live-session mode).
     fingerprint: Option<Fingerprint>,
     /// Evasion script (cached)
@@ -314,17 +416,25 @@ impl Browser {
                     Error::Launch(format!("Browser launch worker failed: {}", error))
                 })??;
 
-        let child = prepared
-            .child
-            .take()
-            .ok_or_else(|| Error::Launch("Browser launch lost its Chrome child".into()))?;
-        let proxy_auth = match (&config.proxy_username, &config.proxy_password) {
-            (Some(username), Some(password)) => Some((username.clone(), password.clone())),
-            _ => None,
+        let spawned = prepared.child.is_some();
+        let transport = match prepared.child.take() {
+            Some(child) => {
+                let proxy_auth = match (&config.proxy_username, &config.proxy_password) {
+                    (Some(username), Some(password)) => Some((username.clone(), password.clone())),
+                    _ => None,
+                };
+                Transport::new_with_options(child, &prepared.ws_url, proxy_auth, config.cdp_timeout)
+                    .await?
+            }
+            None => {
+                Transport::connect_with_options(
+                    &prepared.ws_url,
+                    config.cdp_timeout,
+                    config.filter_cdp,
+                )
+                .await?
+            }
         };
-        let transport =
-            Transport::new_with_options(child, &prepared.ws_url, proxy_auth, config.cdp_timeout)
-                .await?;
         let connection = Connection::new(transport);
 
         let version = connection.version().await?;
@@ -334,6 +444,9 @@ impl Browser {
             .fingerprint
             .take()
             .ok_or_else(|| Error::Launch("Browser launch lost its fingerprint".into()))?;
+        // browser_owned_path() is already None for a user-supplied (and thus
+        // possibly attached-to) profile, so a reused Chrome's profile dir is
+        // never deleted on close/drop.
         let user_data_dir = prepared.profile.browser_owned_path();
 
         let evasion_script = build_evasion_script_for(&config, &fingerprint);
@@ -342,6 +455,7 @@ impl Browser {
             connection,
             config,
             user_data_dir,
+            reused: !spawned,
             fingerprint: Some(fingerprint),
             evasion_script,
         })
@@ -382,6 +496,7 @@ impl Browser {
             connection,
             config,
             user_data_dir: None,
+            reused: false,
             fingerprint,
             evasion_script,
         })
@@ -497,11 +612,12 @@ impl Browser {
         Ok(())
     }
 
-    /// Close the browser. In live-session mode, this is equivalent to
-    /// `disconnect()` — we never send `Browser.close` to a Chrome we don't own.
+    /// Close the browser. In live-session mode, or when we attached to a
+    /// Chrome we didn't spawn (see `try_attach_existing`), this is
+    /// equivalent to `disconnect()` — we never send `Browser.close` to a
+    /// Chrome we don't own.
     pub async fn close(self) -> Result<()> {
-        if self.config.live_session {
-            // Don't kill the user's Chrome; just drop the connection.
+        if self.config.live_session || self.reused {
             self.connection.transport().close().await?;
         } else {
             self.connection.close().await?;
@@ -548,5 +664,102 @@ impl Drop for Browser {
                 );
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod try_attach_existing_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn temp_profile_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "eoka-browser-test-{}-{}-{}",
+            std::process::id(),
+            name,
+            fastrand::u64(..)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Our own cmdline never contains "--headless" (it's the `cargo test`
+    /// binary), so pointing a fake lock at `std::process::id()` gives us a
+    /// guaranteed-live pid with a known, non-headless argv — no real Chrome
+    /// needed to exercise the liveness/headless-detection branches.
+    fn lock_self(dir: &std::path::Path) {
+        symlink(
+            format!("some-host-{}", std::process::id()),
+            dir.join("SingletonLock"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn no_lock_returns_none() {
+        let dir = temp_profile_dir("no-lock");
+        assert!(try_attach_existing(&dir, true).unwrap().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stale_lock_is_cleared_and_returns_none() {
+        let dir = temp_profile_dir("stale-lock");
+        // A pid this large is never a real live process.
+        symlink("some-host-2147483647", dir.join("SingletonLock")).unwrap();
+
+        assert!(try_attach_existing(&dir, true).unwrap().is_none());
+        assert!(
+            !dir.join("SingletonLock").exists(),
+            "stale lock should have been removed"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn headless_mismatch_errors_before_touching_the_network() {
+        let dir = temp_profile_dir("headless-mismatch");
+        lock_self(&dir);
+        // No DevToolsActivePort written — if the headless check didn't run
+        // first, this would produce the "no debug port" error instead.
+        let error = try_attach_existing(&dir, true).unwrap_err().to_string();
+        assert!(
+            error.contains("non-headless") && error.contains("requesting headless mode"),
+            "expected a headless/headed mismatch error, got: {}",
+            error
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn live_lock_without_debug_port_errors() {
+        let dir = temp_profile_dir("no-port");
+        lock_self(&dir);
+
+        // Matches our own (non-headless) argv, so the headless check passes
+        // and the missing-port error is what should surface.
+        let error = try_attach_existing(&dir, false).unwrap_err().to_string();
+        assert!(
+            error.contains("debug port"),
+            "expected a missing-debug-port error, got: {}",
+            error
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unresponsive_port_errors() {
+        let dir = temp_profile_dir("bad-port");
+        lock_self(&dir);
+        // Port 0 is never a connectable listener.
+        std::fs::write(dir.join("DevToolsActivePort"), "0\n/devtools/browser/x\n").unwrap();
+
+        let error = try_attach_existing(&dir, false).unwrap_err().to_string();
+        assert!(
+            error.contains("isn't responding"),
+            "expected an unresponsive-port error, got: {}",
+            error
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

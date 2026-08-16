@@ -126,7 +126,21 @@ pub struct StealthConfig {
     pub proxy: Option<String>,
     /// Durable Chrome user-data directory. When set, Eoka preserves the
     /// profile and its full fingerprint identity across browser launches.
+    ///
+    /// If a Chrome instance is already running on this directory, Eoka
+    /// attaches to it instead of spawning a second process (which Chrome's
+    /// own singleton lock would silently hand off to and exit).
     pub user_data_dir: Option<String>,
+    /// Named profile within `user_data_dir` (Chrome's `--profile-directory`,
+    /// e.g. "Profile 1"). Only meaningful when `user_data_dir` is set;
+    /// defaults to Chrome's implicit "Default" profile when `None`.
+    ///
+    /// Chrome's singleton lock (and thus Eoka's reuse detection above) is
+    /// scoped to the whole `user_data_dir`, not the individual profile —
+    /// launching a second `profile_dir` while a Chrome is already running
+    /// on the same `user_data_dir` attaches to that same running instance
+    /// rather than opening a separate one, matching Chrome's own behavior.
+    pub profile_dir: Option<String>,
     /// Proxy username for authenticated proxies
     pub proxy_username: Option<String>,
     /// Proxy password for authenticated proxies
@@ -170,6 +184,7 @@ impl Default for StealthConfig {
             debug_dir: None,
             proxy: None,
             user_data_dir: None,
+            profile_dir: None,
             proxy_username: None,
             proxy_password: None,
             cdp_timeout: 30,

@@ -309,7 +309,7 @@ mod http_get_regression_tests {
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf); // drain the request, ignore contents
+            let _ = stream.read(&mut buf);
 
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",

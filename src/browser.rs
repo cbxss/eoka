@@ -426,8 +426,6 @@ impl Browser {
                 Transport::new_with_options(child, &prepared.ws_url, proxy_auth, config.cdp_timeout)
                     .await?
             }
-            // Attached to an already-running Chrome (try_attach_existing) —
-            // connect to its WebSocket without taking ownership of a process.
             None => {
                 Transport::connect_with_options(
                     &prepared.ws_url,
@@ -620,7 +618,6 @@ impl Browser {
     /// Chrome we don't own.
     pub async fn close(self) -> Result<()> {
         if self.config.live_session || self.reused {
-            // Don't kill a Chrome we don't own; just drop the connection.
             self.connection.transport().close().await?;
         } else {
             self.connection.close().await?;
@@ -725,9 +722,6 @@ mod try_attach_existing_tests {
         lock_self(&dir);
         // No DevToolsActivePort written — if the headless check didn't run
         // first, this would produce the "no debug port" error instead.
-
-        // Our own process (the test binary) is never headless, so asking to
-        // attach in headless mode is a guaranteed mismatch.
         let error = try_attach_existing(&dir, true).unwrap_err().to_string();
         assert!(
             error.contains("non-headless") && error.contains("requesting headless mode"),

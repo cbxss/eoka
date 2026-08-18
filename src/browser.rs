@@ -526,6 +526,10 @@ impl Browser {
             session.fetch_enable(true).await?;
         }
 
+        if self.config.ignore_cert_errors {
+            session.set_ignore_cert_errors(true).await?;
+        }
+
         if !self.config.live_session {
             if let Some(ref fp) = self.fingerprint {
                 session.set_user_agent_full(ua_override_for(fp)).await?;

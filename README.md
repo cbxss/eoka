@@ -245,6 +245,12 @@ page.accept_dialog(None).await?;            // accept alert/confirm
 page.dismiss_dialog().await?;               // dismiss dialog
 ```
 
+`page.ignore_cert_errors` takes effect only for navigations issued after the
+call — too late for `new_page(url)`'s own initial navigate. For a bad cert on
+the very first load (e.g. an `.onion` service redirecting `http://` →
+untrusted `https://`), set `StealthConfig.ignore_cert_errors = true` instead,
+or use `new_blank_page()` + `ignore_cert_errors(true)` + `goto()`.
+
 ### Retry
 
 ```rust

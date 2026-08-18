@@ -164,6 +164,12 @@ pub struct StealthConfig {
     /// Drop "detectable" CDP commands like `Runtime.enable` silently.
     /// Defaults to true. Set to false in connect mode to get full DevTools-like control.
     pub filter_cdp: bool,
+    /// Ignore TLS certificate errors on every page from creation, before the
+    /// first navigation. `Page::ignore_cert_errors` is applied too late for
+    /// `new_page`'s own initial navigate — this covers self-signed/expired
+    /// certs (e.g. .onion services) hit on the very first load. Defaults to
+    /// false.
+    pub ignore_cert_errors: bool,
 }
 
 impl Default for StealthConfig {
@@ -193,6 +199,7 @@ impl Default for StealthConfig {
             aggressive_cdp_evasion: false,
             live_session: false,
             filter_cdp: true,
+            ignore_cert_errors: false,
         }
     }
 }

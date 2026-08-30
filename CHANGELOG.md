@@ -2,6 +2,93 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.8] - 2026-08-29
+
+### Changed
+
+- **`Fingerprint` is now the single source of platform truth.** All
+  emulated-machine data lives on the fingerprint and is persisted with durable
+  profiles: `voices` (`SpeechVoice` list, platform-correct and stable per
+  identity) and `media_devices` (`MediaDevicesSpec` — counts typed to the
+  claimed OS, e.g. Linux desktops usually have no webcam). Evasion scripts are
+  now dumb templates: placeholder values are filled from one list and must all
+  come from the fingerprint (guarded by `test_placeholders_are_filled`).
+- Derived platform values are methods, not ad-hoc logic: `ch_architecture()`
+  replaces the "Apple M" renderer string-matching hack in client hints, and
+  `ui_chrome_height()` gives per-OS taskbar/menu-bar heights for
+  `screen.availHeight` (previously a hardcoded Windows 40px).
+- Fake media-device IDs are generated from the identity's noise seed in Rust,
+  stable per profile and distinct across profiles; the JS no longer derives
+  them.
+- **Breaking:** persisted identities missing the new fields no longer load —
+  profiles created before this change must be deleted (durable-profile
+  directories under `~/.local/state/eoka/profiles`).
+- **Fixed:** the `Accept-Language` client-hint header is now derived from
+  `navigator.languages` (Chrome's q-value ordering) instead of hardcoded
+  `en-US,en;q=0.9` — geo-aligned identities no longer leak a header/JS
+  language mismatch.
+- Deleted dead code: unused `Fetch.continueRequest` / `Fetch.fulfillRequest` /
+  `Fetch.failRequest` / `Fetch.disable` session wrappers and their CDP types
+  (the transport auto-responder handles interception directly).
+
+### Fixed
+
+- **Timezone split-brain** (verified against stock Chrome): the JS shim made
+  `Intl` and `getTimezoneOffset()` claim the fingerprint timezone while
+  `Date.toString()`/`getHours()` still reported the host timezone — an
+  inconsistent pair any page can compare. Sessions now apply native
+  `Emulation.setTimezoneOverride` so the entire `Date`/`Intl` surface agrees.
+- **Impossible `prefers-reduced-motion` state**: the `matchMedia` wrapper
+  returned `matches: false` for both `reduce` and `no-preference` (one must
+  always match), and returned a non-`MediaQueryList` object. The wrapper is
+  removed; stock headless/new already reports the correct pair.
+- **`window.chrome` didn't match stock Chrome**: eoka injected a `runtime`
+  object that plain Chrome doesn't expose to pages (it's extension-only) and
+  is now verified against stock Chrome 152: keys are exactly
+  `["loadTimes", "csi", "app"]`.
+- **`navigator.deviceMemory` could report 16 or 32** — impossible values;
+  Chrome caps the report at 8. Buckets are now 4/8.
+- **macOS speech voices on non-macOS identities**: `speechSynthesis`
+  fallback voices are now platform-aware (macOS/Windows lists; Linux passes
+  through, matching stock Linux Chrome's zero voices).
+- **Cross-session linkable media devices**: fake `enumerateDevices`
+  group/device IDs were one eoka-wide constant; they are now derived from the
+  per-fingerprint noise seed.
+- **Canvas hook inconsistency**: `toDataURL`/`toBlob` were noised but plain
+  `getImageData` reads weren't, so a page comparing both could flag the
+  canvas. `getImageData` now applies the identical LSB noise.
+- `Intl.DateTimeFormat` no longer mutates the caller's options object.
+- **Profile directories were world-readable**: spawned profiles and CLI
+  profile clones (containing the cookie store) now get 0700 permissions.
+
+### Added
+
+- **Font identity**: `Fingerprint.fonts` — a platform-typical system font set
+  (Windows Segoe UI family, macOS Helvetica family, Linux DejaVu/Liberation
+  family, with per-identity variation on Linux). The new `document.fonts.check`
+  spoof resolves only claimed fonts plus CSS generic families, so font
+  enumeration reports the claimed OS instead of the host. Measurement-based
+  font probing (canvas `measureText`) is NOT covered.
+- **Keyboard layout**: `Fingerprint::keyboard_map_json()` — US ANSI
+  `KeyboardLayoutMap` for Windows/macOS identities (matching their en-US
+  locale); Linux passes through untouched (no fabrication where stock Chrome
+  exposes the real host layout).
+- **`StealthConfig.strip_x_client_data`** (default `true`). Chrome sends an
+  `X-Client-Data` request header with field-trial variation IDs to Google-owned
+  properties; a fresh automation profile has a distinctive (often empty) set
+  that server-side bot scoring reads before any JavaScript runs. Eoka now
+  launches Chrome with `--disable-field-trial-config` and strips the header
+  from every request via CDP `Fetch` interception (auto-continued in the
+  transport reader). Also fixes a latent transport bug: auto-responder CDP
+  command IDs above `i64::MAX` are silently dropped by DevTools, which would
+  have stalled any request paused by interception (and any `Fetch.authRequired`
+  flow).
+- **`StealthConfig.geo_align`** (default `false`). Resolves timezone and
+  `navigator.languages` from the browser's apparent public IP (ipwho.is, with a
+  Cloudflare-trace country fallback) via a one-shot navigation before the first
+  real page, keeping `Date`/`Intl`, `Accept-Language`, and the fingerprint
+  consistent with IP geolocation instead of a random timezone.
+
 ## [0.5.0] - 2026-07-06
 
 A refactor release: smaller, more reusable public API and a modern async

@@ -5,9 +5,11 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -108,6 +110,23 @@ impl Drop for ChildCleanupGuard {
 /// Broadcast capacity for CDP events (multi-consumer, lag observable).
 const EVENT_CHANNEL_CAP: usize = 1024;
 
+/// Remove `X-Client-Data` from a CDP request-headers object (case-insensitive
+/// match, like HTTP header semantics). Returns `None` when the header is
+/// absent so callers can continue the request unmodified.
+fn strip_client_data_header(headers: &Value) -> Option<serde_json::Map<String, Value>> {
+    let map = headers.as_object()?;
+    let has_header = map.keys().any(|k| k.eq_ignore_ascii_case("x-client-data"));
+    if !has_header {
+        return None;
+    }
+    Some(
+        map.iter()
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("x-client-data"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    )
+}
+
 /// Check if a command should be blocked (highly detectable by anti-bot)
 fn is_blocked(method: &str) -> bool {
     matches!(
@@ -184,7 +203,7 @@ pub enum CdpMessage {
 impl Transport {
     /// Create a new transport connecting to Chrome via WebSocket
     pub async fn new(child: Child, ws_url: &str) -> Result<Self> {
-        Self::new_with_options(child, ws_url, None, 30).await
+        Self::new_with_options(child, ws_url, None, 30, false).await
     }
 
     /// Connect the WebSocket and return the stream.
@@ -209,6 +228,7 @@ impl Transport {
         proxy_auth: Option<(String, String)>,
         cdp_timeout_secs: u64,
         filter_cdp: bool,
+        strip_x_client_data: bool,
     ) -> Self {
         let cmd_timeout = std::time::Duration::from_secs(cdp_timeout_secs);
         tracing::debug!("CDP timeout set to {}s", cdp_timeout_secs);
@@ -229,6 +249,7 @@ impl Transport {
                 event_tx_clone,
                 reader_writer,
                 proxy_auth,
+                strip_x_client_data,
             )
             .await;
         });
@@ -246,12 +267,14 @@ impl Transport {
         }
     }
 
-    /// Create a new transport with proxy auth and configurable CDP timeout.
+    /// Create a new transport with proxy auth, X-Client-Data stripping and
+    /// configurable CDP timeout.
     pub async fn new_with_options(
         child: Child,
         ws_url: &str,
         proxy_auth: Option<(String, String)>,
         cdp_timeout_secs: u64,
+        strip_x_client_data: bool,
     ) -> Result<Self> {
         let mut child = ChildCleanupGuard::new(child);
         let stream = Self::ws_connect(ws_url).await?;
@@ -261,6 +284,7 @@ impl Transport {
             proxy_auth,
             cdp_timeout_secs,
             true,
+            strip_x_client_data,
         ))
     }
 
@@ -268,7 +292,14 @@ impl Transport {
     /// Does not manage a Chrome process — caller owns the browser lifecycle.
     pub async fn connect(ws_url: &str, cdp_timeout_secs: u64) -> Result<Self> {
         let stream = Self::ws_connect(ws_url).await?;
-        Ok(Self::build(None, stream, None, cdp_timeout_secs, true))
+        Ok(Self::build(
+            None,
+            stream,
+            None,
+            cdp_timeout_secs,
+            true,
+            false,
+        ))
     }
 
     /// Connect to an existing Chrome with full options control. Use
@@ -278,6 +309,7 @@ impl Transport {
         ws_url: &str,
         cdp_timeout_secs: u64,
         filter_cdp: bool,
+        strip_x_client_data: bool,
     ) -> Result<Self> {
         let stream = Self::ws_connect(ws_url).await?;
         Ok(Self::build(
@@ -286,23 +318,32 @@ impl Transport {
             None,
             cdp_timeout_secs,
             filter_cdp,
+            strip_x_client_data,
         ))
     }
 
     /// Reader task — reads CDP messages off the WebSocket. tokio-tungstenite
     /// handles framing/fragmentation/close; we only reply to pings and parse
     /// text payloads. If `proxy_auth` is set, `Fetch.authRequired` events are
-    /// auto-answered with `Fetch.continueWithAuth`.
+    /// auto-answered with `Fetch.continueWithAuth`. When Fetch interception is
+    /// active (proxy auth or X-Client-Data stripping), `Fetch.requestPaused`
+    /// events are always auto-continued — interception pauses every matching
+    /// request, so an unanswered pause would hang the page forever. With
+    /// `strip_x_client_data` the `X-Client-Data` header is removed on the way
+    /// through.
     async fn reader_loop(
         mut source: WsSource,
         pending: Arc<PendingMap>,
         event_tx: broadcast::Sender<CdpMessage>,
         writer: SharedSink,
         proxy_auth: Option<(String, String)>,
+        strip_x_client_data: bool,
     ) {
         let exit_reason;
-        // Separate command ID space for auth responses (won't collide with main IDs)
-        let mut auth_cmd_id: u64 = u64::MAX / 2;
+        // Separate command ID space for auth/interception auto-responses (won't
+        // collide with main IDs for the first ~2 billion commands). Must stay
+        // within int32: DevTools silently drops commands with ids outside it.
+        let mut auth_cmd_id: u64 = 1_000_000_000;
 
         loop {
             let text = match source.next().await {
@@ -416,6 +457,50 @@ impl Transport {
                             continue; // Don't forward to event channel
                         }
                     }
+                }
+
+                // Auto-continue paused requests when Fetch interception is
+                // active (proxy auth or X-Client-Data stripping). Interception
+                // pauses every matching request; an unanswered pause would
+                // hang the page forever.
+                if method == "Fetch.requestPaused" {
+                    if let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) {
+                        let request_headers = params
+                            .pointer("/request/headers")
+                            .cloned()
+                            .unwrap_or(json!({}));
+                        let modified_headers = if strip_x_client_data {
+                            strip_client_data_header(&request_headers)
+                        } else {
+                            None
+                        };
+                        auth_cmd_id += 1;
+                        let mut response = json!({
+                            "id": auth_cmd_id,
+                            "method": "Fetch.continueRequest",
+                            "params": {
+                                "requestId": request_id,
+                            }
+                        });
+                        if let Some(headers) = modified_headers {
+                            response["params"]["headers"] = Value::Object(headers);
+                        }
+                        if let Some(ref sid) = session_id {
+                            response["sessionId"] = json!(sid);
+                        }
+                        if let Ok(data) = serde_json::to_string(&response) {
+                            let mut w = writer.lock().await;
+                            if let Err(e) = w.send(Message::Text(data.into())).await {
+                                exit_reason = format!("Fetch continue write failed: {}", e);
+                                // Break so pending requests fail immediately
+                                // instead of hanging.
+                                break;
+                            } else {
+                                tracing::trace!("Auto-continued paused request");
+                            }
+                        }
+                    }
+                    continue; // Don't forward to event channel
                 }
 
                 // Publish event; ignore "no active receivers" errors.
@@ -630,6 +715,22 @@ impl Drop for Transport {
 
 /// Launch Chrome and get the WebSocket debugging URL
 pub fn launch_chrome(path: &std::path::Path, args: &[String]) -> Result<(Child, String)> {
+    launch_chrome_impl(path, args, None)
+}
+
+pub(crate) fn launch_chrome_with_profile_dir(
+    path: &std::path::Path,
+    args: &[String],
+    profile_dir: &Path,
+) -> Result<(Child, String)> {
+    launch_chrome_impl(path, args, Some(profile_dir))
+}
+
+fn launch_chrome_impl(
+    path: &std::path::Path,
+    args: &[String],
+    profile_dir: Option<&Path>,
+) -> Result<(Child, String)> {
     use std::process::Command;
 
     let mut cmd = Command::new(path);
@@ -643,7 +744,6 @@ pub fn launch_chrome(path: &std::path::Path, args: &[String]) -> Result<(Child, 
         .spawn()
         .map_err(|e| Error::Launch(format!("Failed to launch Chrome: {}", e)))?;
 
-    // Read stderr to find the DevTools URL (with 30s timeout)
     let stderr = child
         .stderr
         .take()
@@ -652,44 +752,164 @@ pub fn launch_chrome(path: &std::path::Path, args: &[String]) -> Result<(Child, 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
-        // Chrome prints: DevTools listening on ws://127.0.0.1:PORT/devtools/browser/GUID
+        let mut stderr_tail = Vec::new();
         for line in reader.lines() {
             let line = match line {
                 Ok(l) => l,
-                Err(_) => break,
+                Err(error) => {
+                    let _ = tx.send(Err(format!("failed to read Chrome stderr: {}", error)));
+                    return;
+                }
             };
 
             tracing::trace!("Chrome stderr: {}", line);
+            stderr_tail.push(line.clone());
+            if stderr_tail.len() > 20 {
+                stderr_tail.remove(0);
+            }
 
             if line.contains("DevTools listening on") {
                 if let Some(url_start) = line.find("ws://") {
-                    if tx.send(line[url_start..].trim().to_string()).is_err() {
+                    if tx.send(Ok(line[url_start..].trim().to_string())).is_err() {
                         tracing::debug!("Chrome launch receiver dropped before URL delivery");
                     }
                     return;
                 }
             }
         }
+        let stderr = stderr_tail.join("\n");
+        let message = if stderr.is_empty() {
+            "Chrome exited before printing DevTools URL and produced no stderr".to_string()
+        } else {
+            format!(
+                "Chrome exited before printing DevTools URL. stderr:\n{}",
+                stderr
+            )
+        };
+        let _ = tx.send(Err(message));
     });
 
-    let ws_url = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-        Ok(url) => url,
-        Err(channel_error) => {
-            // Kill Chrome so a missing DevTools URL can't orphan it.
-            if let Err(cleanup_error) = stop_child(&mut child) {
-                tracing::warn!(
-                    "Failed to clean up Chrome after launch-channel error: {}",
-                    cleanup_error
-                );
-            }
-            return Err(Error::Launch(format!(
-                "Failed waiting for Chrome DevTools URL: {}",
-                channel_error
-            )));
-        }
-    };
+    let ws_url = wait_for_chrome_devtools_url(&mut child, &rx, profile_dir)?;
 
     tracing::info!("Chrome DevTools URL: {}", ws_url);
 
     Ok((child, ws_url))
+}
+
+fn wait_for_chrome_devtools_url(
+    child: &mut Child,
+    rx: &std::sync::mpsc::Receiver<std::result::Result<String, String>>,
+    profile_dir: Option<&Path>,
+) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    loop {
+        match rx.try_recv() {
+            Ok(Ok(url)) => return Ok(url),
+            Ok(Err(stderr)) => {
+                let status = child
+                    .try_wait()
+                    .map(|status| status.map(|s| s.to_string()))
+                    .unwrap_or(None)
+                    .unwrap_or_else(|| "still running".to_string());
+                stop_child_after_failed_launch(child);
+                return Err(Error::Launch(format!(
+                    "Failed waiting for Chrome DevTools URL: process {}; {}",
+                    status, stderr
+                )));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                stop_child_after_failed_launch(child);
+                return Err(Error::Launch(
+                    "Failed waiting for Chrome DevTools URL: stderr reader exited unexpectedly"
+                        .into(),
+                ));
+            }
+        }
+
+        if let Some(dir) = profile_dir {
+            if let Some(port) = crate::cdp::discover::read_devtools_active_port(dir) {
+                return crate::cdp::discover::discover_browser_ws("127.0.0.1", port).map_err(
+                    |error| {
+                        Error::Launch(format!(
+                            "Chrome wrote DevToolsActivePort ({}) but discovery failed: {}",
+                            port, error
+                        ))
+                    },
+                );
+            }
+        }
+
+        if let Ok(Some(status)) = child.try_wait() {
+            let stderr = rx
+                .recv_timeout(Duration::from_millis(250))
+                .ok()
+                .and_then(|result| result.err())
+                .unwrap_or_else(|| "Chrome exited before printing DevTools URL".to_string());
+            stop_child_after_failed_launch(child);
+            return Err(Error::Launch(format!(
+                "Failed waiting for Chrome DevTools URL: process {}; {}",
+                status, stderr
+            )));
+        }
+
+        if Instant::now() >= deadline {
+            stop_child_after_failed_launch(child);
+            return Err(Error::Launch(
+                "Failed waiting for Chrome DevTools URL after 30s".into(),
+            ));
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn stop_child_after_failed_launch(child: &mut Child) {
+    if let Err(cleanup_error) = stop_child(child) {
+        tracing::warn!(
+            "Failed to clean up Chrome after launch-channel error: {}",
+            cleanup_error
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_x_client_data_case_insensitively() {
+        let headers = json!({
+            "User-Agent": "test",
+            "X-Client-Data": "abc123",
+            "Accept": "*/*"
+        });
+        let stripped = strip_client_data_header(&headers).expect("header present");
+        assert_eq!(stripped.len(), 2);
+        assert!(stripped.get("User-Agent").is_some());
+        assert!(stripped.get("Accept").is_some());
+        assert!(strip_client_data_header(&Value::Object(stripped)).is_none());
+    }
+
+    #[test]
+    fn returns_none_when_header_absent() {
+        let headers = json!({ "User-Agent": "test", "Accept": "*/*" });
+        assert!(strip_client_data_header(&headers).is_none());
+        assert!(strip_client_data_header(&json!({})).is_none());
+        assert!(strip_client_data_header(&json!(null)).is_none());
+    }
+
+    #[test]
+    fn preserves_other_headers_verbatim() {
+        let headers = json!({
+            "sec-ch-ua": "\"Chromium\";v=\"140\"",
+            "x-client-data": "CJKxyz="
+        });
+        let stripped = strip_client_data_header(&headers).expect("header present");
+        assert_eq!(
+            stripped.get("sec-ch-ua").and_then(|v| v.as_str()),
+            Some("\"Chromium\";v=\"140\"")
+        );
+    }
 }

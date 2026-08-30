@@ -795,6 +795,15 @@ pub struct SecuritySetIgnoreCertificateErrors {
     pub ignore: bool,
 }
 
+/// Emulation.setTimezoneOverride — set the browser-native ICU timezone for
+/// this session. Unlike a JS shim, this makes `Date.toString()`, `getHours()`,
+/// `Intl` and friends natively consistent with the claimed timezone.
+#[derive(Debug, Clone, Serialize)]
+pub struct EmulationSetTimezoneOverride {
+    #[serde(rename = "timezoneId")]
+    pub timezone_id: String,
+}
+
 /// Page.handleJavaScriptDialog — accept or dismiss an open JS dialog
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -827,58 +836,6 @@ pub struct FetchEnable {
     pub patterns: Option<Vec<RequestPattern>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handle_auth_requests: Option<bool>,
-}
-
-/// Fetch.disable — turn off Fetch domain interception
-pub type FetchDisable = Empty;
-
-/// A single header name/value pair used in Fetch.fulfillRequest / Fetch.continueRequest
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FetchHeaderEntry {
-    pub name: String,
-    pub value: String,
-}
-
-/// Fetch.continueRequest — pass an intercepted request through (optionally modified)
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FetchContinueRequest {
-    pub request_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub method: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_data: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub headers: Option<Vec<FetchHeaderEntry>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub intercept_response: Option<bool>,
-}
-
-/// Fetch.fulfillRequest — respond to an intercepted request with a synthetic response
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FetchFulfillRequest {
-    pub request_id: String,
-    pub response_code: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_headers: Option<Vec<FetchHeaderEntry>>,
-    /// base64-encoded body
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_phrase: Option<String>,
-}
-
-/// Fetch.failRequest — abort an intercepted request with a network error
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FetchFailRequest {
-    pub request_id: String,
-    /// CDP NetworkErrorReason, e.g. "Aborted", "AccessDenied", "AddressUnreachable"
-    pub error_reason: String,
 }
 
 #[cfg(test)]

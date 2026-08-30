@@ -11,6 +11,7 @@ use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 const PERSISTED_FINGERPRINT_FILE: &str = ".eoka-fingerprint.json";
 
@@ -88,6 +89,210 @@ fn choose<T>(slice: &[T]) -> &T {
     &slice[fastrand::usize(..slice.len())]
 }
 
+/// A system text-to-speech voice as reported by `speechSynthesis.getVoices()`.
+/// Field names serialize exactly as the Web Speech API spells them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechVoice {
+    /// Voice display name, e.g. "Alex".
+    pub name: String,
+    /// BCP-47 language tag, e.g. "en-US".
+    pub lang: String,
+    /// Whether the voice is available offline.
+    pub local_service: bool,
+    /// Whether this is the platform default voice.
+    pub default: bool,
+    /// Voice identifier (same as `name` for system voices).
+    #[serde(rename = "voiceURI")]
+    pub voice_uri: String,
+}
+
+/// Typical audio/video hardware for one identity, as produced by a fake
+/// `mediaDevices.enumerateDevices()` when the real list is empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaDevicesSpec {
+    /// Microphone count.
+    pub audio_inputs: u32,
+    /// Speaker/output count.
+    pub audio_outputs: u32,
+    /// Camera count.
+    pub video_inputs: u32,
+}
+
+impl Default for MediaDevicesSpec {
+    fn default() -> Self {
+        Self {
+            audio_inputs: 1,
+            audio_outputs: 1,
+            video_inputs: 1,
+        }
+    }
+}
+
+impl MediaDevicesSpec {
+    /// Plausible hardware for a claimed platform. Windows/macOS identities
+    /// look like laptops (webcam present); Linux desktops frequently have
+    /// none.
+    fn for_platform(platform: Platform) -> Self {
+        match platform {
+            Platform::Linux => Self {
+                video_inputs: *choose(&[0, 0, 1]),
+                ..Self::default()
+            },
+            _ => Self {
+                audio_inputs: 1,
+                audio_outputs: *choose(&[1, 2]),
+                video_inputs: 1,
+            },
+        }
+    }
+}
+
+/// Platform-typical fallback voices for `speechSynthesis.getVoices()`. Stock
+/// Linux Chrome has none (empty list = pass-through); Alex/Samantha are
+/// macOS-only, David/Zira are Windows-only.
+fn default_voices_for(platform: Platform) -> Vec<SpeechVoice> {
+    let voices: &[(&str, &str, bool, bool)] = match platform {
+        Platform::MacOS => &[
+            ("Alex", "en-US", true, true),
+            ("Samantha", "en-US", true, false),
+            ("Victoria", "en-US", true, false),
+            ("Daniel", "en-GB", true, false),
+            ("Google US English", "en-US", false, false),
+        ],
+        Platform::Windows => &[
+            (
+                "Microsoft David - English (United States)",
+                "en-US",
+                true,
+                true,
+            ),
+            (
+                "Microsoft Zira - English (United States)",
+                "en-US",
+                true,
+                false,
+            ),
+            (
+                "Microsoft Mark - English (United States)",
+                "en-US",
+                true,
+                false,
+            ),
+            ("Google US English", "en-US", false, false),
+        ],
+        Platform::Linux => &[],
+    };
+    voices
+        .iter()
+        .map(|(name, lang, local, default)| SpeechVoice {
+            name: (*name).to_string(),
+            lang: (*lang).to_string(),
+            local_service: *local,
+            default: *default,
+            voice_uri: (*name).to_string(),
+        })
+        .collect()
+}
+
+/// Base system font set for a claimed platform, as seen by
+/// `document.fonts.check` probing. Order-insensitive; generics are always
+/// allowed on top of these.
+fn base_fonts_for(platform: Platform) -> &'static [&'static str] {
+    match platform {
+        Platform::Windows => &[
+            "Segoe UI",
+            "Arial",
+            "Calibri",
+            "Cambria",
+            "Consolas",
+            "Courier New",
+            "Georgia",
+            "Impact",
+            "Tahoma",
+            "Times New Roman",
+            "Trebuchet MS",
+            "Verdana",
+            "Microsoft Sans Serif",
+            "Comic Sans MS",
+            "Candara",
+            "Franklin Gothic Medium",
+            "Rockwell",
+        ],
+        Platform::MacOS => &[
+            "Helvetica",
+            "Helvetica Neue",
+            "Arial",
+            "Menlo",
+            "Monaco",
+            "Courier New",
+            "Georgia",
+            "Times New Roman",
+            "Palatino",
+            "Avenir",
+            "Avenir Next",
+            "Futura",
+            "Geneva",
+            "Lucida Grande",
+            "Optima",
+            "Baskerville",
+            "American Typewriter",
+        ],
+        Platform::Linux => &[
+            "DejaVu Sans",
+            "DejaVu Serif",
+            "DejaVu Sans Mono",
+            "Liberation Sans",
+            "Liberation Serif",
+            "Liberation Mono",
+            "Ubuntu",
+            "Cantarell",
+            "FreeSans",
+            "FreeSerif",
+            "Noto Sans",
+            "Noto Serif",
+            "Noto Mono",
+        ],
+    }
+}
+
+/// Font families every real Chrome resolves regardless of installed fonts.
+pub(crate) const GENERIC_FONTS: &[&str] = &[
+    "serif",
+    "sans-serif",
+    "monospace",
+    "cursive",
+    "fantasy",
+    "system-ui",
+    "ui-sans-serif",
+    "ui-serif",
+    "ui-monospace",
+    "ui-rounded",
+    "math",
+    "emoji",
+    "none",
+];
+
+/// US ANSI layout: `KeyboardLayoutMap.get(code)` entries for the punctuation
+/// and space keys. Letters and digits are generated programmatically.
+const US_LAYOUT_ENTRIES: &[(&str, &str)] = &[
+    ("Backquote", "`"),
+    ("Minus", "-"),
+    ("Equal", "="),
+    ("BracketLeft", "["),
+    ("BracketRight", "]"),
+    ("Backslash", "\\"),
+    ("Semicolon", ";"),
+    ("Quote", "'"),
+    ("Comma", ","),
+    ("Period", "."),
+    ("Slash", "/"),
+    ("Space", " "),
+];
+
+/// Build the US-layout letter and digit entries programmatically is not
+/// possible in a const table, so `keyboard_map_json` appends KeyA-KeyZ and
+/// Digit0-Digit9 at runtime.
 /// WebGL vendor, WebGL renderer and client-hint platform version for a platform.
 fn platform_surfaces(platform: Platform) -> (&'static str, String, String) {
     match platform {
@@ -175,6 +380,16 @@ pub struct Fingerprint {
     /// Stable canvas/audio perturbation seed for this identity.
     #[serde(default = "random_noise_seed")]
     pub noise_seed: u32,
+    /// Platform-typical fallback for `speechSynthesis.getVoices()` when the
+    /// real list is empty (empty for Linux: stock Linux Chrome has none).
+    pub voices: Vec<SpeechVoice>,
+    /// Fake `mediaDevices.enumerateDevices()` hardware counts when the real
+    /// list is empty.
+    pub media_devices: MediaDevicesSpec,
+    /// System fonts claimed installed for this identity (drives the
+    /// `document.fonts.check` spoof). Generic families are always allowed on
+    /// top of this set.
+    pub fonts: Vec<String>,
 }
 
 /// Operating system platform for a fingerprint.
@@ -219,12 +434,31 @@ impl Fingerprint {
             screen_height,
             color_depth: 24,
             hardware_concurrency: *choose(&[4, 8, 10, 12, 16]),
-            device_memory: *choose(&[8, 8, 16, 32]),
+            // Chrome reports deviceMemory capped at 8 (spec: one of
+            // 0.25..8); 16/32 are impossible values and an instant tell.
+            device_memory: *choose(&[4, 8, 8]),
             timezone: choose(super::evasions::COMMON_TIMEZONES).to_string(),
             languages: vec!["en-US".to_string(), "en".to_string()],
             webgl_vendor: webgl_vendor.to_string(),
             webgl_renderer,
             noise_seed: random_noise_seed(),
+            voices: default_voices_for(platform),
+            media_devices: MediaDevicesSpec::for_platform(platform),
+            fonts: {
+                let mut fonts: Vec<String> = base_fonts_for(platform)
+                    .iter()
+                    .map(|f| (*f).to_string())
+                    .collect();
+                // Linux font sets differ the most between machines; rotate and
+                // trim a random tail so identities don't all look identical.
+                if platform == Platform::Linux {
+                    let rotate = fastrand::usize(..fonts.len());
+                    fonts.rotate_left(rotate);
+                    let drop = choose(&[1usize, 1, 2, 3]);
+                    fonts.truncate(fonts.len() - drop);
+                }
+                fonts
+            },
         }
     }
 
@@ -337,6 +571,90 @@ impl Fingerprint {
         }
     }
 
+    /// Client-hint `architecture` for the claimed platform. `platform_surfaces`
+    /// picks Apple-silicon renderers for macOS, so macOS claims are ARM.
+    pub fn ch_architecture(&self) -> &'static str {
+        match self.platform {
+            Platform::MacOS => "arm",
+            Platform::Windows | Platform::Linux => "x86",
+        }
+    }
+
+    /// Assumed OS chrome (taskbar/menu bar) height subtracted from
+    /// `screen.height` when spoofing `screen.availHeight`.
+    pub fn ui_chrome_height(&self) -> u32 {
+        match self.platform {
+            Platform::MacOS => 25,
+            Platform::Windows => 40,
+            Platform::Linux => 30,
+        }
+    }
+
+    /// JSON `KeyboardLayoutMap` entries for the claimed platform, or `null`
+    /// where the Keyboard API doesn't exist in stock Chrome (Linux). All
+    /// eoka identities use en-US locales, so the layout is US ANSI.
+    pub fn keyboard_map_json(&self) -> String {
+        match self.platform {
+            Platform::Linux => "null".to_string(),
+            Platform::Windows | Platform::MacOS => {
+                let mut map = serde_json::Map::new();
+                for (code, key) in US_LAYOUT_ENTRIES {
+                    map.insert((*code).to_string(), json!((*key).to_string()));
+                }
+                for letter in b'a'..=b'z' {
+                    let key = (letter as char).to_string();
+                    map.insert(format!("Key{}", key.to_ascii_uppercase()), json!(key));
+                }
+                for digit in 0..10u8 {
+                    map.insert(format!("Digit{digit}"), json!(digit.to_string()));
+                }
+                serde_json::to_string(&map).unwrap_or_else(|_| "null".to_string())
+            }
+        }
+    }
+
+    /// JSON device list for the `mediaDevices.enumerateDevices` fallback,
+    /// built from the spec and noise seed so IDs are stable per identity.
+    pub fn media_devices_json(&self) -> String {
+        let mut seed = self.noise_seed as u64 ^ 0x9e37_79b9_7f4a_7c15;
+        let mut device_id = move || {
+            let mut id = String::with_capacity(12);
+            for _ in 0..12 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                id.push(char::from_digit(((seed >> 28) & 0xf) as u32, 16).unwrap_or('0'));
+            }
+            id
+        };
+
+        let mut devices: Vec<serde_json::Value> = Vec::new();
+        let audio_group = device_id();
+        for index in 0..self.media_devices.audio_inputs {
+            devices.push(json!({
+                "deviceId": if index == 0 { "default".into() } else { device_id() },
+                "groupId": audio_group,
+                "kind": "audioinput",
+                "label": "",
+            }));
+        }
+        for index in 0..self.media_devices.audio_outputs {
+            devices.push(json!({
+                "deviceId": if index == 0 { "default".into() } else { device_id() },
+                "groupId": audio_group,
+                "kind": "audiooutput",
+                "label": "",
+            }));
+        }
+        for index in 0..self.media_devices.video_inputs {
+            devices.push(json!({
+                "deviceId": if index == 0 { "default".into() } else { device_id() },
+                "groupId": device_id(),
+                "kind": "videoinput",
+                "label": "",
+            }));
+        }
+        serde_json::to_string(&devices).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// `Sec-CH-UA-Platform` value ("macOS" / "Windows").
     pub fn ch_platform(&self) -> &'static str {
         match self.platform {
@@ -414,13 +732,29 @@ mod tests {
     }
 
     #[test]
+    fn test_device_memory_never_exceeds_chrome_cap() {
+        // Regression: 16/32 are impossible values — Chrome's spec buckets end
+        // at 8, and an out-of-range report is an instant bot tell.
+        for _ in 0..200 {
+            let fp = Fingerprint::random();
+            assert!(
+                fp.device_memory <= 8,
+                "device_memory {} exceeds Chrome's cap of 8",
+                fp.device_memory
+            );
+            assert!([0.25_f64, 0.5, 1.0, 2.0, 4.0, 8.0].contains(&(fp.device_memory as f64)));
+        }
+    }
+
+    #[test]
     fn test_fingerprint_random_is_consistent() {
         for _ in 0..50 {
             let fp = Fingerprint::random();
             assert!(!fp.user_agent.is_empty());
             assert!(fp.screen_width > 0 && fp.screen_height > 0);
             assert!([4, 8, 10, 12, 16].contains(&fp.hardware_concurrency));
-            assert!([8, 16, 32].contains(&fp.device_memory));
+            // Chrome caps the reported value at 8 (spec bucket maximum).
+            assert!([4, 8].contains(&fp.device_memory));
             match fp.platform {
                 Platform::MacOS => {
                     assert!(fp.user_agent.contains("Macintosh"));
@@ -451,6 +785,94 @@ mod tests {
         assert_eq!(fp.platform, Platform::Windows);
         assert_eq!(fp.chrome_major, "140");
         assert_eq!(fp.nav_platform(), "Win32");
+    }
+
+    // Coherence matrix: whatever the claimed platform, every platform-derived
+    // surface must agree — architecture, OS chrome height, voices, devices,
+    // fonts, keyboard.
+    #[test]
+    fn test_platform_surfaces_are_coherent() {
+        let cases = [
+            (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36",
+                "x86",
+                40,
+                "Microsoft David",
+                "Segoe UI",
+            ),
+            (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36",
+                "arm",
+                25,
+                "Alex",
+                "Helvetica",
+            ),
+            (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36",
+                "x86",
+                30,
+                "",
+                "DejaVu",
+            ),
+        ];
+        for (ua, architecture, chrome_height, expected_voice, expected_font_prefix) in cases {
+            let fp = Fingerprint::resolve(Some(ua), None);
+            assert_eq!(fp.ch_architecture(), architecture);
+            assert_eq!(fp.ui_chrome_height(), chrome_height);
+
+            if expected_voice.is_empty() {
+                assert!(fp.voices.is_empty(), "Linux claims must have no voices");
+            } else {
+                assert!(
+                    fp.voices.iter().any(|v| v.name.starts_with(expected_voice)),
+                    "voices must match the claimed platform (expected {expected_voice})"
+                );
+            }
+
+            // Fonts: the representative platform font must be claimed, and no
+            // other platform's signature font may appear.
+            assert!(
+                fp.fonts.iter().any(|f| f.starts_with(expected_font_prefix)),
+                "fonts must match the claimed platform (expected {expected_font_prefix})"
+            );
+            let disallowed: &[&str] = match expected_font_prefix {
+                "Segoe UI" => &["Helvetica Neue", "Cantarell", "DejaVu Sans"],
+                "Helvetica" => &["Segoe UI", "Cantarell", "DejaVu Sans"],
+                _ => &["Segoe UI", "Helvetica Neue"],
+            };
+            for other_font in disallowed {
+                assert!(
+                    !fp.fonts.iter().any(|f| f.starts_with(other_font)),
+                    "cross-platform font {other_font} must not be claimed here"
+                );
+            }
+
+            // Keyboard: Linux has no Keyboard API in stock Chrome; Win/macOS
+            // get a complete US layout.
+            let keyboard = fp.keyboard_map_json();
+            if expected_voice.is_empty() {
+                assert_eq!(keyboard, "null");
+            } else {
+                let map: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_str(&keyboard).expect("keyboard map must be valid JSON");
+                assert_eq!(map.get("KeyA").and_then(|v| v.as_str()), Some("a"));
+                assert_eq!(map.get("Digit1").and_then(|v| v.as_str()), Some("1"));
+                assert_eq!(map.get("Minus").and_then(|v| v.as_str()), Some("-"));
+                assert_eq!(map.len(), 26 + 10 + 12);
+            }
+
+            let devices: serde_json::Value =
+                serde_json::from_str(&fp.media_devices_json()).expect("valid device JSON");
+            let array = devices.as_array().unwrap();
+            let expected_len = (fp.media_devices.audio_inputs
+                + fp.media_devices.audio_outputs
+                + fp.media_devices.video_inputs) as usize;
+            assert_eq!(array.len(), expected_len);
+            for device in array {
+                assert_eq!(device["label"], "");
+                assert!(device["kind"].is_string());
+            }
+        }
     }
 
     #[test]

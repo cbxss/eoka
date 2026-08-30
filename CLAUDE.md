@@ -186,6 +186,15 @@ Transport blocks detectable commands at `src/cdp/transport.rs:24-37`:
 - `HeapProfiler.*` - BLOCKED
 - `Console.enable` - BLOCKED
 
+### X-Client-Data Header
+Chromium sends `X-Client-Data` (field-trial variation IDs) on requests to
+Google-owned domains; a fresh automation profile has a distinctive set that
+Google scores before any page JS runs. Eoka launches with
+`--disable-field-trial-config` and strips the header via CDP Fetch
+interception auto-continued in the transport reader
+(`StealthConfig.strip_x_client_data`). Auto-responder CDP command IDs must
+stay within int32 — DevTools silently drops commands with larger ids.
+
 ### Document Proxy
 CDP markers ($cdc_*) are hidden via Proxy on document object. See `src/stealth/evasions.rs` CDP_EVASION.
 

@@ -6,11 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::Value;
 
 /// Global counter for unique user data directories
 static BROWSER_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-use crate::cdp::transport::launch_chrome;
+use crate::cdp::transport::launch_chrome_with_profile_dir;
 use crate::cdp::types::{EmulationSetUserAgentOverride, UserAgentBrandVersion, UserAgentMetadata};
 use crate::cdp::{Connection, Transport};
 use crate::error::{Error, Result};
@@ -20,11 +23,43 @@ use crate::stealth::{build_evasion_script_for, find_chrome, ChromePatcher};
 use crate::StealthConfig;
 
 fn remove_dir_if_exists(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_dir_all(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        result => result,
+    const ATTEMPTS: usize = 10;
+
+    for attempt in 0..ATTEMPTS {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if is_directory_not_empty(&error) && attempt + 1 < ATTEMPTS => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(())
+}
+
+fn is_directory_not_empty(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(39) | Some(66) | Some(145))
+}
+
+/// Restrict a profile directory to its owner (0700). Profiles contain the
+/// cookie store; a default-umask /tmp directory would be world-readable.
+#[cfg(unix)]
+fn restrict_profile_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(0o700);
+    if let Err(error) = std::fs::set_permissions(path, perms) {
+        tracing::warn!(
+            "Failed to restrict profile dir {}: {}",
+            path.display(),
+            error
+        );
     }
 }
+
+#[cfg(not(unix))]
+fn restrict_profile_perms(_path: &Path) {}
 
 async fn discover_browser_ws(port: u16) -> Result<String> {
     tokio::task::spawn_blocking(move || {
@@ -66,6 +101,10 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
         "--password-store=basic".into(),
         "--use-mock-keychain".into(),
         "--lang=en-US".into(),
+        // Don't apply field-trial variations: they feed the `X-Client-Data`
+        // header Google properties use to profile installs (see
+        // `strip_x_client_data`).
+        "--disable-field-trial-config".into(),
         // Window size
         format!(
             "--window-size={},{}",
@@ -132,6 +171,7 @@ impl BrowserProfileGuard {
             Some(path) => {
                 let path = PathBuf::from(path);
                 std::fs::create_dir_all(&path)?;
+                restrict_profile_perms(&path);
                 Ok(Self { path, owned: false })
             }
             None => {
@@ -143,6 +183,7 @@ impl BrowserProfileGuard {
                 ));
                 remove_dir_if_exists(&path)?;
                 std::fs::create_dir_all(&path)?;
+                restrict_profile_perms(&path);
                 Ok(Self { path, owned: true })
             }
         }
@@ -313,7 +354,7 @@ fn prepare_browser_launch(config: Arc<StealthConfig>) -> Result<PreparedBrowserL
     args.push(format!("--user-data-dir={}", profile.path.display()));
 
     tracing::info!("Launching Chrome from {:?}", chrome_path);
-    let (child, ws_url) = launch_chrome(&chrome_path, &args)?;
+    let (child, ws_url) = launch_chrome_with_profile_dir(&chrome_path, &args, &profile.path)?;
     Ok(PreparedBrowserLaunch {
         child: Some(child),
         ws_url,
@@ -333,6 +374,103 @@ pub struct TabInfo {
     pub url: String,
 }
 
+/// One-shot navigation targets for geo alignment. The API returns JSON with
+/// `timezone.id` and `country_code`; the trace endpoint is a fallback that
+/// only yields the country (`loc=`).
+const GEO_API_URL: &str = "https://ipwho.is/";
+const GEO_TRACE_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
+
+/// Geo info resolved from the browser's apparent public IP.
+#[derive(Debug, Clone)]
+struct GeoInfo {
+    timezone: Option<String>,
+    country: String,
+}
+
+/// Parse an ipwho.is response into [`GeoInfo`].
+fn parse_geo_api(text: &str) -> Option<GeoInfo> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let timezone = value.pointer("/timezone/id")?.as_str()?.to_string();
+    let country = value.get("country_code")?.as_str()?.to_string();
+    if timezone.is_empty()
+        || country.len() != 2
+        || !country.bytes().all(|byte| byte.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    Some(GeoInfo {
+        timezone: Some(timezone),
+        country: country.to_uppercase(),
+    })
+}
+
+/// Parse a Cloudflare trace response into [`GeoInfo`] (country only — the
+/// trace response has no timezone field).
+fn parse_geo_trace(text: &str) -> Option<GeoInfo> {
+    let mut country = None;
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("loc=") {
+            country = Some(value.trim().to_string());
+        }
+    }
+    let country = country.filter(|c| c.len() == 2 && c.chars().all(|c| c.is_ascii_alphabetic()))?;
+    Some(GeoInfo {
+        timezone: None,
+        country: country.to_uppercase(),
+    })
+}
+
+/// Browser `Accept-Language`-style list for an IP country code, matching how
+/// Chrome orders locales for a default install in that country.
+fn languages_for_country(country: &str) -> Vec<String> {
+    let languages: &[&str] = match country {
+        "US" => &["en-US", "en"],
+        "GB" => &["en-GB", "en"],
+        "AU" | "NZ" => &["en-AU", "en"],
+        "CA" => &["en-CA", "fr-CA", "en", "fr"],
+        "IE" => &["en-IE", "en"],
+        "IN" => &["en-IN", "hi-IN", "en", "hi"],
+        "DE" | "AT" => &["de-DE", "de"],
+        "CH" => &["de-CH", "fr-CH", "it-CH", "de", "fr", "it"],
+        "FR" | "LU" => &["fr-FR", "fr"],
+        "BE" => &["nl-BE", "fr-BE", "nl", "fr"],
+        "ES" | "MX" | "AR" | "CL" | "CO" => &["es-ES", "es"],
+        "BR" => &["pt-BR", "pt"],
+        "PT" => &["pt-PT", "pt"],
+        "IT" => &["it-IT", "it"],
+        "NL" => &["nl-NL", "nl"],
+        "SE" => &["sv-SE", "sv"],
+        "NO" => &["nb-NO", "no"],
+        "DK" => &["da-DK", "da"],
+        "FI" => &["fi-FI", "fi"],
+        "PL" => &["pl-PL", "pl"],
+        "CZ" | "SK" => &["cs-CZ", "cs"],
+        "HU" => &["hu-HU", "hu"],
+        "RO" => &["ro-RO", "ro"],
+        "GR" => &["el-GR", "el"],
+        "TR" => &["tr-TR", "tr"],
+        "RU" | "BY" | "KZ" => &["ru-RU", "ru"],
+        "UA" => &["uk-UA", "ru", "uk"],
+        "JP" => &["ja-JP", "ja"],
+        "KR" => &["ko-KR", "ko"],
+        "CN" => &["zh-CN", "zh"],
+        "TW" | "HK" => &["zh-TW", "zh"],
+        "VN" => &["vi-VN", "vi"],
+        "TH" => &["th-TH", "th"],
+        "ID" => &["id-ID", "id"],
+        "SA" | "AE" | "EG" => &["ar-SA", "ar"],
+        "IL" => &["he-IL", "he"],
+        _ => &["en-US", "en"],
+    };
+    languages.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// Navigate a page to `url` and return the body text (used for geo lookups).
+async fn read_remote_text(page: &Page, url: &str) -> Result<String> {
+    page.goto(url).await?;
+    page.text().await
+}
+
 /// Build the `Emulation.setUserAgentOverride` payload from the resolved fingerprint.
 fn ua_override_for(fp: &Fingerprint) -> EmulationSetUserAgentOverride {
     let to_brands = |v: Vec<(String, String)>| -> Vec<UserAgentBrandVersion> {
@@ -340,14 +478,12 @@ fn ua_override_for(fp: &Fingerprint) -> EmulationSetUserAgentOverride {
             .map(|(brand, version)| UserAgentBrandVersion { brand, version })
             .collect()
     };
-    let architecture = if fp.webgl_renderer.contains("Apple M") {
-        "arm"
-    } else {
-        "x86"
-    };
+    let architecture = fp.ch_architecture();
     EmulationSetUserAgentOverride {
         user_agent: fp.user_agent.clone(),
-        accept_language: Some("en-US,en;q=0.9".to_string()),
+        // Chrome sends the first language bare and the rest at q=0.9; the
+        // header must match `navigator.languages` (filled from the same list).
+        accept_language: Some(accept_language_for(&fp.languages)),
         platform: Some(fp.nav_platform().to_string()),
         user_agent_metadata: Some(UserAgentMetadata {
             brands: to_brands(fp.ch_brands()),
@@ -361,6 +497,21 @@ fn ua_override_for(fp: &Fingerprint) -> EmulationSetUserAgentOverride {
             wow64: false,
         }),
     }
+}
+
+/// Chrome-style `Accept-Language` value for a language list:
+/// `de-DE,de;q=0.9,en;q=0.8` — first entry bare, each following entry one
+/// quality step lower (minimum 0.1).
+fn accept_language_for(languages: &[String]) -> String {
+    languages
+        .iter()
+        .enumerate()
+        .map(|(index, language)| match index {
+            0 => language.clone(),
+            _ => format!("{};q={:.1}", language, (1.0 - 0.1 * index as f64).max(0.1)),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The main stealth browser
@@ -423,14 +574,21 @@ impl Browser {
                     (Some(username), Some(password)) => Some((username.clone(), password.clone())),
                     _ => None,
                 };
-                Transport::new_with_options(child, &prepared.ws_url, proxy_auth, config.cdp_timeout)
-                    .await?
+                Transport::new_with_options(
+                    child,
+                    &prepared.ws_url,
+                    proxy_auth,
+                    config.cdp_timeout,
+                    config.strip_x_client_data,
+                )
+                .await?
             }
             None => {
                 Transport::connect_with_options(
                     &prepared.ws_url,
                     config.cdp_timeout,
                     config.filter_cdp,
+                    config.strip_x_client_data,
                 )
                 .await?
             }
@@ -451,14 +609,69 @@ impl Browser {
 
         let evasion_script = build_evasion_script_for(&config, &fingerprint);
 
-        Ok(Self {
+        let mut browser = Self {
             connection,
             config,
             user_data_dir,
             reused: !spawned,
             fingerprint: Some(fingerprint),
             evasion_script,
-        })
+        };
+        if spawned && browser.config.geo_align && browser.config.timezone.is_none() {
+            browser.align_geo().await;
+        }
+        Ok(browser)
+    }
+
+    /// Align timezone and interface languages with the browser's apparent
+    /// public IP via a one-shot navigation to Cloudflare's trace endpoint.
+    /// Runs before any real page exists, so every later page picks up the
+    /// aligned fingerprint in both the client-hint override and the evasion
+    /// script (`Date`, `Intl`, `navigator.languages`). Non-fatal on failure:
+    /// the random fingerprint timezone is kept and a warning is logged.
+    async fn align_geo(&mut self) {
+        let outcome: Result<GeoInfo> = async {
+            let page = self.new_blank_page().await?;
+            let result: Result<GeoInfo> = async {
+                match read_remote_text(&page, GEO_API_URL)
+                    .await
+                    .ok()
+                    .and_then(|ref text| parse_geo_api(text))
+                {
+                    Some(geo) => Ok(geo),
+                    None => {
+                        let text = read_remote_text(&page, GEO_TRACE_URL).await?;
+                        parse_geo_trace(&text)
+                            .ok_or_else(|| Error::Launch("geo response missing loc".into()))
+                    }
+                }
+            }
+            .await;
+            let _ = self.close_tab(page.target_id()).await;
+            result
+        }
+        .await;
+
+        match outcome {
+            Ok(geo) => {
+                if let Some(fp) = self.fingerprint.as_mut() {
+                    if let Some(timezone) = geo.timezone {
+                        fp.timezone = timezone;
+                    }
+                    fp.languages = languages_for_country(&geo.country);
+                }
+                if let Some(fp) = self.fingerprint.as_ref() {
+                    self.evasion_script = build_evasion_script_for(&self.config, fp);
+                }
+                tracing::info!(
+                    "Geo-aligned languages/timezone (IP country {})",
+                    geo.country
+                );
+            }
+            Err(error) => {
+                tracing::warn!("Geo alignment failed, keeping random timezone: {}", error);
+            }
+        }
     }
 
     /// Connect to an existing Chrome instance at the given WebSocket CDP URL.
@@ -479,6 +692,7 @@ impl Browser {
             ws_url,
             config.cdp_timeout,
             config.filter_cdp,
+            config.strip_x_client_data && !config.live_session,
         )
         .await?;
         let connection = Connection::new(transport);
@@ -522,8 +736,12 @@ impl Browser {
     async fn setup_session(&self, session: &crate::cdp::Session) -> Result<()> {
         session.page_enable().await?;
 
-        if self.config.proxy_username.is_some() && self.config.proxy_password.is_some() {
-            session.fetch_enable(true).await?;
+        let proxy_auth =
+            self.config.proxy_username.is_some() && self.config.proxy_password.is_some();
+        if proxy_auth || self.config.strip_x_client_data {
+            session
+                .fetch_enable_interception(vec![], proxy_auth)
+                .await?;
         }
 
         if self.config.ignore_cert_errors {
@@ -533,6 +751,12 @@ impl Browser {
         if !self.config.live_session {
             if let Some(ref fp) = self.fingerprint {
                 session.set_user_agent_full(ua_override_for(fp)).await?;
+                // Native ICU override: makes `Date.toString()`, `getHours()` and
+                // friends consistent with the claimed timezone (a JS shim alone
+                // leaves them reporting the host timezone).
+                if let Err(error) = session.set_timezone_override(&fp.timezone).await {
+                    tracing::warn!("Timezone override failed for {}: {}", fp.timezone, error);
+                }
             }
             session
                 .add_script_to_evaluate_on_new_document(&self.evasion_script)
@@ -765,5 +989,127 @@ mod try_attach_existing_tests {
             error
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parses_geo_api_response() {
+        let body = r#"{"ip":"203.0.113.9","country_code":"DE","timezone":{"id":"Europe/Berlin","abbr":"CEST"}}"#;
+        let geo = parse_geo_api(body).expect("valid geo api response");
+        assert_eq!(geo.timezone.as_deref(), Some("Europe/Berlin"));
+        assert_eq!(geo.country, "DE");
+        assert!(parse_geo_api("not json").is_none());
+        assert!(parse_geo_api(r#"{"success":false,"message":"rate limited"}"#).is_none());
+    }
+
+    #[test]
+    fn parses_geo_trace_response() {
+        let trace = "fl=123\n\nip=203.0.113.9\nloc=DE\nsnf=oia\n";
+        let geo = parse_geo_trace(trace).expect("valid trace");
+        assert_eq!(geo.timezone, None);
+        assert_eq!(geo.country, "DE");
+    }
+
+    #[test]
+    fn rejects_malformed_geo_trace() {
+        assert!(parse_geo_trace("fl=1\nip=1.2.3.4\n").is_none());
+        assert!(parse_geo_trace("loc=\n").is_none());
+        assert!(parse_geo_trace("loc=DEU\n").is_none());
+        assert!(parse_geo_trace("").is_none());
+    }
+
+    #[test]
+    fn languages_match_ip_country() {
+        assert_eq!(languages_for_country("DE"), vec!["de-DE", "de"]);
+        assert_eq!(languages_for_country("JP"), vec!["ja-JP", "ja"]);
+        assert_eq!(
+            languages_for_country("CA"),
+            vec!["en-CA", "fr-CA", "en", "fr"]
+        );
+        assert_eq!(languages_for_country("ZZ"), vec!["en-US", "en"]);
+    }
+
+    #[test]
+    fn stealth_args_disable_field_trials() {
+        let config = StealthConfig::default();
+        let fp = Fingerprint::random();
+        let args = stealth_args(&config, &fp);
+        assert!(args.iter().any(|arg| arg == "--disable-field-trial-config"));
+    }
+
+    // Privacy regression: profile dirs hold the cookie store and previously
+    // landed in /tmp with default umask (world-readable). They must be 0700.
+    #[cfg(unix)]
+    #[test]
+    fn profile_dirs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let owned = BrowserProfileGuard::create(&StealthConfig::default()).unwrap();
+        let mode = std::fs::metadata(&owned.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "spawned temp profile dir must be 0700");
+        std::fs::remove_dir_all(&owned.path).unwrap();
+
+        let custom = temp_profile_dir("user-supplied");
+        let guard = BrowserProfileGuard::create(&StealthConfig {
+            user_data_dir: Some(custom.to_string_lossy().into_owned()),
+            ..StealthConfig::default()
+        })
+        .unwrap();
+        let mode = std::fs::metadata(&guard.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "user-supplied profile dir must be tightened to 0700"
+        );
+        std::fs::remove_dir_all(&custom).unwrap();
+    }
+
+    // Audit regression: the Accept-Language header used to be hardcoded
+    // en-US while navigator.languages followed the fingerprint/geo align —
+    // a header-vs-JS mismatch any server can compare.
+    #[test]
+    fn accept_language_matches_fingerprint_languages() {
+        assert_eq!(
+            accept_language_for(&["en-US".into(), "en".into()]),
+            "en-US,en;q=0.9"
+        );
+        assert_eq!(
+            accept_language_for(&["de-DE".into(), "de".into(), "en".into()]),
+            "de-DE,de;q=0.9,en;q=0.8"
+        );
+
+        let fp = Fingerprint::random();
+        let override_payload = ua_override_for(&fp);
+        assert_eq!(
+            override_payload.accept_language.as_deref(),
+            Some(accept_language_for(&fp.languages).as_str()),
+            "Accept-Language must be derived from navigator.languages"
+        );
+    }
+
+    // Regression: the fonts and keyboard hooks must be present and driven by
+    // fingerprint data, with Linux keyboard passing through untouched.
+    #[test]
+    fn fonts_and_keyboard_hooks_are_fingerprint_driven() {
+        let windows_fp = Fingerprint::resolve(
+            Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36"),
+            None,
+        );
+        let windows_script = build_evasion_script_for(&StealthConfig::default(), &windows_fp);
+        assert!(windows_script.contains("document.fonts.check"));
+        assert!(
+            windows_script.contains(&serde_json::to_string(&windows_fp.fonts).unwrap()),
+            "claimed font set must flow into the script"
+        );
+        assert!(windows_script.contains("getLayoutMap"));
+
+        let linux_fp = Fingerprint::resolve(
+            Some("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36"),
+            None,
+        );
+        let linux_script = build_evasion_script_for(&StealthConfig::default(), &linux_fp);
+        assert!(
+            linux_script
+                .contains("if (navigator.keyboard && navigator.keyboard.getLayoutMap && null)"),
+            "Linux keyboard spoof must be inert"
+        );
     }
 }

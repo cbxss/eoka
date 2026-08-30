@@ -170,6 +170,21 @@ pub struct StealthConfig {
     /// certs (e.g. .onion services) hit on the very first load. Defaults to
     /// false.
     pub ignore_cert_errors: bool,
+    /// Strip Chromium's `X-Client-Data` request header via CDP Fetch
+    /// interception. Chrome sends this header with field-trial variation IDs on
+    /// requests to Google-owned properties; a fresh automation profile carries
+    /// a distinctive (often empty) variation set that server-side bot scoring
+    /// can read before any JavaScript runs. Also launches Chrome with
+    /// `--disable-field-trial-config`. Defaults to true for spawned stealth
+    /// browsers; ignored (never applied) for attached live sessions.
+    pub strip_x_client_data: bool,
+    /// Resolve timezone and interface language from the browser's apparent
+    /// public IP via a one-shot navigation to Cloudflare's trace endpoint
+    /// before any real page is created. Keeps `Date`/`Intl` and the injected
+    /// `navigator.languages` consistent with IP geolocation instead of a
+    /// random timezone. Ignored when `timezone` is set explicitly and when
+    /// attaching to an existing browser. Defaults to false.
+    pub geo_align: bool,
 }
 
 impl Default for StealthConfig {
@@ -200,6 +215,8 @@ impl Default for StealthConfig {
             live_session: false,
             filter_cdp: true,
             ignore_cert_errors: false,
+            strip_x_client_data: true,
+            geo_align: false,
         }
     }
 }

@@ -275,6 +275,16 @@ let browser = Browser::launch_with(|config| {
 }).await?;
 ```
 
+Two server-side reputation signals are handled automatically for spawned
+stealth browsers (see `StealthConfig`):
+
+- `strip_x_client_data: true` (default) — Chrome's `X-Client-Data` request
+  header (field-trial variation IDs) is stripped via CDP Fetch interception on
+  every page, and `--disable-field-trial-config` is passed at launch.
+- `geo_align: false` — opt-in. Aligns timezone and `navigator.languages` with
+  the browser's apparent public IP via a one-shot lookup before the first real
+  navigation. Ignored when `timezone` is set explicitly.
+
 For reusable presets or advanced setup, build a `StealthConfig` directly:
 
 ```rust

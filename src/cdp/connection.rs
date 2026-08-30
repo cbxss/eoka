@@ -171,11 +171,6 @@ impl Session {
 
     /// Enable the Fetch domain, optionally handling auth challenges (proxy auth).
     /// Must be called per-session (per-tab).
-    pub(crate) async fn fetch_enable(&self, handle_auth_requests: bool) -> Result<()> {
-        self.fetch_enable_interception(vec![], handle_auth_requests)
-            .await
-    }
-
     /// Enable page events
     pub(crate) async fn page_enable(&self) -> Result<()> {
         self.send_void("Page.enable", &PageEnable {}).await
@@ -275,6 +270,17 @@ impl Session {
             .await
     }
 
+    /// Set the browser-native ICU timezone for this session.
+    pub(crate) async fn set_timezone_override(&self, timezone_id: &str) -> Result<()> {
+        self.send_void(
+            "Emulation.setTimezoneOverride",
+            &EmulationSetTimezoneOverride {
+                timezone_id: timezone_id.to_string(),
+            },
+        )
+        .await
+    }
+
     /// Ignore TLS certificate errors for this session.
     pub(crate) async fn set_ignore_cert_errors(&self, ignore: bool) -> Result<()> {
         self.send_void(
@@ -317,77 +323,6 @@ impl Session {
                     Some(patterns)
                 },
                 handle_auth_requests: Some(handle_auth),
-            },
-        )
-        .await
-    }
-
-    /// Disable Fetch domain interception.
-    #[allow(dead_code)] // request-interception wrapper, kept for completeness
-    pub(crate) async fn fetch_disable(&self) -> Result<()> {
-        self.send_void("Fetch.disable", &FetchDisable {}).await
-    }
-
-    /// Continue an intercepted request, optionally modifying URL/method/headers/body.
-    #[allow(dead_code)] // request-interception wrapper, kept for completeness
-    pub(crate) async fn fetch_continue(
-        &self,
-        request_id: &str,
-        url: Option<&str>,
-        method: Option<&str>,
-        headers: Option<Vec<FetchHeaderEntry>>,
-        post_data: Option<&str>,
-    ) -> Result<()> {
-        self.send_void(
-            "Fetch.continueRequest",
-            &FetchContinueRequest {
-                request_id: request_id.to_string(),
-                url: url.map(String::from),
-                method: method.map(String::from),
-                post_data: post_data.map(String::from),
-                headers,
-                intercept_response: None,
-            },
-        )
-        .await
-    }
-
-    /// Fulfill an intercepted request with a synthetic response.
-    /// `body` will be base64-encoded automatically.
-    #[allow(dead_code)] // request-interception wrapper, kept for completeness
-    pub(crate) async fn fetch_fulfill(
-        &self,
-        request_id: &str,
-        status_code: u16,
-        headers: Option<Vec<FetchHeaderEntry>>,
-        body: Option<&str>,
-    ) -> Result<()> {
-        let encoded_body = body.map(|b| {
-            use base64::Engine;
-            base64::engine::general_purpose::STANDARD.encode(b)
-        });
-        self.send_void(
-            "Fetch.fulfillRequest",
-            &FetchFulfillRequest {
-                request_id: request_id.to_string(),
-                response_code: status_code,
-                response_headers: headers,
-                body: encoded_body,
-                response_phrase: None,
-            },
-        )
-        .await
-    }
-
-    /// Abort an intercepted request with a network error.
-    /// `error_reason`: "Aborted", "AccessDenied", "AddressUnreachable", "ConnectionRefused", etc.
-    #[allow(dead_code)] // request-interception wrapper, kept for completeness
-    pub(crate) async fn fetch_fail(&self, request_id: &str, error_reason: &str) -> Result<()> {
-        self.send_void(
-            "Fetch.failRequest",
-            &FetchFailRequest {
-                request_id: request_id.to_string(),
-                error_reason: error_reason.to_string(),
             },
         )
         .await

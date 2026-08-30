@@ -4,7 +4,7 @@
 //! detectable browser properties.
 
 use crate::page::escape_js_string;
-use crate::stealth::fingerprint::Fingerprint;
+use crate::stealth::fingerprint::{Fingerprint, GENERIC_FONTS};
 use crate::StealthConfig;
 
 /// Native-function masking: makes `_eoka_mark`ed functions report native code from `.toString()`.
@@ -222,28 +222,11 @@ if (document.documentElement) {
 document.addEventListener('DOMContentLoaded', cleanupDocAttributes);
 "#;
 
-/// Chrome runtime object
+/// Chrome runtime object. Matches a real, extension-less Chrome page context:
+/// `Object.keys(window.chrome)` is `["loadTimes", "csi", "app"]` and
+/// `chrome.runtime` is undefined (verified against stock Chrome 152).
 pub const CHROME_RUNTIME_EVASION: &str = r#"
 window.chrome = {
-    runtime: {
-        onConnect: {
-            addListener: function() {},
-            removeListener: function() {}
-        },
-        onMessage: {
-            addListener: function() {},
-            removeListener: function() {}
-        },
-        connect: function() {
-            return {
-                onMessage: { addListener: function() {} },
-                onDisconnect: { addListener: function() {} },
-                postMessage: function() {}
-            };
-        },
-        sendMessage: function() {},
-        id: undefined
-    },
     loadTimes: function() {
         return {
             commitLoadTime: Date.now() / 1000 - _eoka_rand() * 2,
@@ -399,34 +382,18 @@ for (const [prop, desc] of Object.entries(navProps)) {
 
 /// Headless detection bypass
 pub const HEADLESS_EVASION: &str = r#"
-// Fix screen properties
+// Fix screen properties. The subtracted band is the OS chrome height
+// (taskbar / menu bar) claimed by the fingerprint.
 Object.defineProperty(screen, 'availWidth', { get: _eoka_mark(() => screen.width, 'get availWidth'), configurable: true });
-Object.defineProperty(screen, 'availHeight', { get: _eoka_mark(() => screen.height - 40, 'get availHeight'), configurable: true });
+Object.defineProperty(screen, 'availHeight', { get: _eoka_mark(() => screen.height - __EOKA_UI_CHROME__, 'get availHeight'), configurable: true });
 
 // Mock window dimensions
 Object.defineProperty(window, 'outerWidth', { get: _eoka_mark(() => window.innerWidth, 'get outerWidth'), configurable: true });
 Object.defineProperty(window, 'outerHeight', { get: _eoka_mark(() => window.innerHeight + 85, 'get outerHeight'), configurable: true });
 
-// Fix window.matchMedia
-const originalMatchMedia = window.matchMedia;
-if (originalMatchMedia) {
-    window.matchMedia = _eoka_mark(function matchMedia(query) {
-        const result = originalMatchMedia.call(window, query);
-        if (query.includes('prefers-reduced-motion')) {
-            return {
-                matches: false,
-                media: query,
-                onchange: null,
-                addListener: function() {},
-                removeListener: function() {},
-                addEventListener: function() {},
-                removeEventListener: function() {},
-                dispatchEvent: function() { return true; }
-            };
-        }
-        return result;
-    }, 'matchMedia');
-}
+// Real headless/new and headed Chrome both report the native pair
+// (reduce=false, no-preference=true). Wrapping matchMedia used to fabricate
+// an impossible both-false state, so it is intentionally left untouched.
 
 // Ensure window.origin is correct
 try {
@@ -555,6 +522,20 @@ if (origToBlob) {
     }, 'toBlob');
 }
 
+// getImageData must see the same LSB noise as toDataURL/toBlob, otherwise a
+// page comparing the pixel buffer against the data URL catches the hook.
+const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+CanvasRenderingContext2D.prototype.getImageData = _eoka_mark(function getImageData(...args) {
+    const img = origGetImageData.apply(this, args);
+    const data = img.data;
+    let s = (__EOKA_NOISE_SEED__ >>> 0) || 1;
+    for (let i = 0; i < data.length; i += 4) {
+        s = _eoka_lcg(s);
+        data[i] = data[i] ^ (s & 1);
+    }
+    return img;
+}, 'getImageData');
+
 // Audio noise — deterministic, applied once per channel buffer.
 const origGetChannelData = AudioBuffer.prototype.getChannelData;
 const _eoka_audioSeen = new WeakSet();
@@ -604,16 +585,12 @@ if (typeof webkitRTCPeerConnection !== 'undefined') {
 }
 "#;
 
-/// Speech synthesis - headless Chrome has 0 voices, real Chrome has many
+/// Speech synthesis - headless Chrome has 0 voices, real Chrome has many.
+/// The fallback list is fingerprint data (`__EOKA_SPEECH_VOICES__`, JSON):
+/// platform-aware and stable per identity.
 pub const SPEECH_EVASION: &str = r#"
 if (typeof speechSynthesis !== 'undefined') {
-    const defaultVoices = [
-        { name: 'Alex', lang: 'en-US', localService: true, default: true, voiceURI: 'Alex' },
-        { name: 'Samantha', lang: 'en-US', localService: true, default: false, voiceURI: 'Samantha' },
-        { name: 'Victoria', lang: 'en-US', localService: true, default: false, voiceURI: 'Victoria' },
-        { name: 'Daniel', lang: 'en-GB', localService: true, default: false, voiceURI: 'Daniel' },
-        { name: 'Google US English', lang: 'en-US', localService: false, default: false, voiceURI: 'Google US English' }
-    ].map(v => {
+    const defaultVoices = __EOKA_SPEECH_VOICES__.map(v => {
         const voice = Object.create(SpeechSynthesisVoice.prototype);
         Object.defineProperties(voice, {
             name: { value: v.name, enumerable: true },
@@ -633,20 +610,18 @@ if (typeof speechSynthesis !== 'undefined') {
 }
 "#;
 
-/// Media devices - headless returns empty array
+/// Media devices - headless returns empty array. The fake device list is
+/// fingerprint data (`__EOKA_MEDIA_DEVICES__`, JSON) derived from the noise
+/// seed, so IDs are stable per identity and never shared across sessions.
 pub const MEDIA_DEVICES_EVASION: &str = r#"
 if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
     const origEnumerateDevices = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
 
+    const fakeDevices = __EOKA_MEDIA_DEVICES__;
     navigator.mediaDevices.enumerateDevices = _eoka_mark(async function enumerateDevices() {
         const devices = await origEnumerateDevices();
         if (devices.length === 0) {
-            const fake = [
-                { deviceId: 'default', groupId: '5f8b2c1e9a3d', kind: 'audioinput', label: '' },
-                { deviceId: 'default', groupId: '5f8b2c1e9a3d', kind: 'audiooutput', label: '' },
-                { deviceId: 'e2d4a6c8b0f1', groupId: '9c3e7a1d4b6f', kind: 'videoinput', label: '' }
-            ];
-            return fake.map(d => {
+            return fakeDevices.map(d => {
                 const device = Object.create(MediaDeviceInfo.prototype);
                 Object.defineProperties(device, {
                     deviceId: { value: d.deviceId, enumerable: true },
@@ -681,6 +656,55 @@ if (!navigator.bluetooth) {
 }
 "#;
 
+/// System-font probing via `document.fonts.check(font, text)`: stock Chrome
+/// resolves installed system fonts, so detectors enumerate font names through
+/// it. Only the identity's claimed fonts (plus CSS generic families) resolve;
+/// everything else reports missing. The claimed set is fingerprint data
+/// (`__EOKA_FONTS__`, JSON array).
+pub const FONTS_EVASION: &str = r#"
+if (document.fonts && document.fonts.check) {
+    const origCheck = document.fonts.check.bind(document.fonts);
+    const claimedFonts = new Set(__EOKA_FONTS__.map(f => f.toLowerCase()));
+    const genericFonts = new Set(__EOKA_GENERIC_FONTS__);
+    const familyAllowed = (family) =>
+        claimedFonts.has(family.toLowerCase()) || genericFonts.has(family.toLowerCase());
+
+    document.fonts.check = _eoka_mark(function check(font, text) {
+        if (typeof font !== 'string' || font === '') return origCheck(font, text);
+        const sizeMatch = font.match(/(?:\d+(?:\.\d+)?(?:px|pt|em|rem|ex|ch|vh|vw|%)|[xx]-?small|medium|[xx]-?large)\s*(.*)$/i);
+        const familyList = sizeMatch ? sizeMatch[1] : font;
+        if (!familyList.trim()) return origCheck(font, text);
+        const families = familyList.split(',').map(f => f.trim().replace(/^['"]|['"]$/g, ''));
+        if (!families.length || families.some(f => !f)) return origCheck(font, text);
+        return families.every(familyAllowed);
+    }, 'check');
+}
+"#;
+
+/// `navigator.keyboard.getLayoutMap()` — stock Chrome exposes the Keyboard
+/// API on Windows/macOS/ChromeOS but not Linux, so Linux passes through.
+/// The map is fingerprint data (`__EOKA_KEYBOARD_MAP__`, JSON or null):
+/// US ANSI, matching the identity's en-US locale.
+pub const KEYBOARD_EVASION: &str = r#"
+if (navigator.keyboard && navigator.keyboard.getLayoutMap && __EOKA_KEYBOARD_MAP__) {
+    const layoutEntries = __EOKA_KEYBOARD_MAP__;
+    const layoutMap = new Map(Object.entries(layoutEntries));
+    const fakeMap = {
+        get: _eoka_mark((code) => layoutMap.get(code) || null, 'get'),
+        has: _eoka_mark((code) => layoutMap.has(code), 'has'),
+        size: layoutMap.size,
+        entries: _eoka_mark(() => layoutMap.entries(), 'entries'),
+        forEach: _eoka_mark((cb, thisArg) => layoutMap.forEach(cb, thisArg), 'forEach'),
+        [Symbol.iterator]: _eoka_mark(function* () {
+            yield* layoutMap.entries();
+        }, '[Symbol.iterator]'),
+    };
+    navigator.keyboard.getLayoutMap = _eoka_mark(function getLayoutMap() {
+        return Promise.resolve(fakeMap);
+    }, 'getLayoutMap');
+}
+"#;
+
 /// Timezone consistency - ensure Date timezone matches claimed location.
 /// The `__EOKA_TIMEZONE__` placeholder is replaced at build time with the
 /// actual IANA timezone from StealthConfig.
@@ -690,9 +714,9 @@ const targetTimezone = '__EOKA_TIMEZONE__';
 const origDateTimeFormat = Intl.DateTimeFormat;
 
 Intl.DateTimeFormat = _eoka_mark(function DateTimeFormat(locales, options) {
-    if (!options) options = {};
-    if (!options.timeZone) options.timeZone = targetTimezone;
-    return new origDateTimeFormat(locales, options);
+    const merged = options ? Object.assign({}, options) : {};
+    if (!merged.timeZone) merged.timeZone = targetTimezone;
+    return new origDateTimeFormat(locales, merged);
 }, 'DateTimeFormat');
 Intl.DateTimeFormat.prototype = origDateTimeFormat.prototype;
 Intl.DateTimeFormat.supportedLocalesOf = origDateTimeFormat.supportedLocalesOf;
@@ -768,6 +792,8 @@ pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> Str
         WEBRTC_EVASION,
         SPEECH_EVASION,
         MEDIA_DEVICES_EVASION,
+        FONTS_EVASION,
+        KEYBOARD_EVASION,
         BLUETOOTH_EVASION,
         TIMEZONE_EVASION,
     ];
@@ -795,19 +821,44 @@ pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> Str
     let noise_seed = fp.noise_seed;
 
     let script = format!("(function(){{{}}})();", scripts.join("\n"));
-    script
-        .replace("__EOKA_TIMEZONE__", &escape_js_string(&timezone))
-        .replace("__EOKA_PLATFORM__", &escape_js_string(fp.nav_platform()))
-        .replace("__EOKA_LANGUAGES__", &languages_json)
-        .replace("__EOKA_LANGUAGE__", &escape_js_string(&language))
-        .replace("__EOKA_HW__", &fp.hardware_concurrency.to_string())
-        .replace("__EOKA_MEM__", &fp.device_memory.to_string())
-        .replace("__EOKA_WEBGL_VENDOR__", &escape_js_string(&fp.webgl_vendor))
-        .replace(
+
+    // Single fill-point: every placeholder value comes from the fingerprint
+    // (or config). No placeholder may survive this fold — guarded by
+    // `test_placeholders_are_filled`.
+    let placeholders: Vec<(&str, String)> = vec![
+        ("__EOKA_TIMEZONE__", escape_js_string(&timezone)),
+        ("__EOKA_PLATFORM__", escape_js_string(fp.nav_platform())),
+        ("__EOKA_LANGUAGES__", languages_json),
+        ("__EOKA_LANGUAGE__", escape_js_string(&language)),
+        ("__EOKA_HW__", fp.hardware_concurrency.to_string()),
+        ("__EOKA_MEM__", fp.device_memory.to_string()),
+        ("__EOKA_WEBGL_VENDOR__", escape_js_string(&fp.webgl_vendor)),
+        (
             "__EOKA_WEBGL_RENDERER__",
-            &escape_js_string(&fp.webgl_renderer),
-        )
-        .replace("__EOKA_NOISE_SEED__", &noise_seed.to_string())
+            escape_js_string(&fp.webgl_renderer),
+        ),
+        ("__EOKA_NOISE_SEED__", noise_seed.to_string()),
+        (
+            "__EOKA_SPEECH_VOICES__",
+            serde_json::to_string(&fp.voices).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        ("__EOKA_MEDIA_DEVICES__", fp.media_devices_json()),
+        ("__EOKA_UI_CHROME__", fp.ui_chrome_height().to_string()),
+        (
+            "__EOKA_FONTS__",
+            serde_json::to_string(&fp.fonts).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        (
+            "__EOKA_GENERIC_FONTS__",
+            serde_json::to_string(GENERIC_FONTS).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        ("__EOKA_KEYBOARD_MAP__", fp.keyboard_map_json()),
+    ];
+    placeholders
+        .into_iter()
+        .fold(script, |acc, (placeholder, value)| {
+            acc.replace(placeholder, &value)
+        })
 }
 
 /// Build the complete evasion script based on config.
@@ -928,6 +979,182 @@ mod tests {
         assert!(
             !script.contains("'Foo'Bar'"),
             "unescaped single quote must not appear"
+        );
+    }
+
+    // Audit regression: stock Chrome pages expose window.chrome keys as
+    // ["loadTimes", "csi", "app"] only — chrome.runtime is extension-only and
+    // must never be injected (verified against stock Chrome 152).
+    #[test]
+    fn test_chrome_object_matches_stock() {
+        let script = build_evasion_script(&StealthConfig::default());
+        assert!(
+            script.contains("loadTimes: function"),
+            "chrome.loadTimes must be spoofed (present in stock Chrome)"
+        );
+        assert!(
+            script.contains("csi: function"),
+            "chrome.csi must be spoofed (present in stock Chrome)"
+        );
+        assert!(
+            !script.contains("onConnect"),
+            "chrome.runtime stub must not be re-added: plain pages have no runtime"
+        );
+        assert!(
+            !script.contains("sendMessage: function"),
+            "chrome.runtime stub must not be re-added"
+        );
+    }
+
+    // Audit regression: the old matchMedia wrapper reported matches:false for
+    // BOTH prefers-reduced-motion variants — an impossible state (one always
+    // matches in real Chrome) — and returned a non-MediaQueryList object.
+    #[test]
+    fn test_match_media_is_not_wrapped() {
+        let script = build_evasion_script(&StealthConfig::default());
+        assert!(
+            !script.contains("originalMatchMedia"),
+            "matchMedia must not be wrapped: stock headless/new reports the correct pair"
+        );
+    }
+
+    // Audit regression: fallback voices must match the claimed platform.
+    // Alex/Samantha are macOS-only; Microsoft David/Zira are Windows-only;
+    // stock Linux Chrome has no built-in voices (pass-through).
+    #[test]
+    fn test_speech_voices_match_platform() {
+        let voices_for = |ua: &str| {
+            let fp = Fingerprint::resolve(Some(ua), None);
+            let script = build_evasion_script_for(&StealthConfig::default(), &fp);
+            let start = script
+                .find("const defaultVoices = ")
+                .expect("voices array present")
+                + "const defaultVoices = ".len();
+            let end = script[start..]
+                .find(".map(v =>")
+                .expect("voices array terminated");
+            script[start..start + end].trim().to_string()
+        };
+
+        let linux = voices_for("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36");
+        assert_eq!(
+            linux, "[]",
+            "Linux identities must pass through with no voices"
+        );
+
+        let mac = voices_for("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36");
+        let mac_json: serde_json::Value =
+            serde_json::from_str(&mac).expect("macOS voices must be valid JSON");
+        let mac_names: Vec<&str> = mac_json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["name"].as_str().unwrap())
+            .collect();
+        assert!(mac_names.contains(&"Alex"), "macOS list must contain Alex");
+        assert!(!mac_names.iter().any(|n| n.starts_with("Microsoft")));
+
+        let win = voices_for("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36");
+        let win_json: serde_json::Value =
+            serde_json::from_str(&win).expect("Windows voices must be valid JSON");
+        let win_names: Vec<&str> = win_json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            win_names.iter().any(|n| n.starts_with("Microsoft David")),
+            "Windows list must contain Microsoft David"
+        );
+        assert!(!win_names.contains(&"Alex"), "Alex is macOS-only");
+    }
+
+    // Audit regression: fake media-device IDs used to be one hardcoded
+    // constant shared by every eoka session, linking all identities. They are
+    // now fingerprint data (spec + noise seed), stable per identity and
+    // distinct across identities.
+    #[test]
+    fn test_media_device_ids_are_seeded_per_fingerprint() {
+        let devices_json = |script: &str| -> serde_json::Value {
+            let start = script
+                .find("const fakeDevices = ")
+                .expect("fake device list present")
+                + "const fakeDevices = ".len();
+            let end = script[start..].find(';').expect("device list terminated");
+            serde_json::from_str(&script[start..start + end])
+                .expect("media device list must be valid JSON")
+        };
+
+        let script = build_evasion_script(&StealthConfig::default());
+        assert!(
+            !script.contains("5f8b2c1e9a3d"),
+            "hardcoded cross-session groupId must not reappear"
+        );
+
+        let devices = devices_json(&script).as_array().cloned().unwrap();
+        assert!(!devices.is_empty());
+        let mut ids: Vec<&str> = devices
+            .iter()
+            .map(|d| d["deviceId"].as_str().unwrap())
+            .collect();
+        let defaults = ids.iter().filter(|id| **id == "default").count();
+        ids.retain(|id| *id != "default");
+        assert_eq!(
+            ids.len(),
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            "non-default device IDs must be unique within an identity"
+        );
+        assert!(
+            ids.iter().all(|id| id.len() == 12),
+            "device IDs must be 12 hex chars like real enumerated IDs"
+        );
+        assert!(defaults >= 2, "audio in/out pair should include 'default'");
+
+        // Different fingerprints must present different hardware IDs. The
+        // identity (and therefore the seed) is randomized per build.
+        let fps_a = Fingerprint::random();
+        let fps_b = Fingerprint::random();
+        let ids_a =
+            devices_json(&build_evasion_script_for(&StealthConfig::default(), &fps_a)).to_string();
+        let ids_b =
+            devices_json(&build_evasion_script_for(&StealthConfig::default(), &fps_b)).to_string();
+        assert_ne!(
+            ids_a, ids_b,
+            "distinct identities must not share device IDs (linkability)"
+        );
+    }
+
+    // Audit regression: canvas reads through getImageData must carry the same
+    // noise as toDataURL/toBlob, or a page comparing both flags the hook.
+    #[test]
+    fn test_get_image_data_is_noised_with_canvas_spoof() {
+        let on = build_evasion_script(&StealthConfig::default());
+        assert!(
+            on.contains("CanvasRenderingContext2D.prototype.getImageData"),
+            "getImageData must be hooked when canvas spoofing is on"
+        );
+
+        let off = build_evasion_script(&StealthConfig {
+            webgl_spoof: false,
+            canvas_spoof: false,
+            audio_spoof: false,
+            ..StealthConfig::default()
+        });
+        assert!(
+            !off.contains("getImageData"),
+            "canvas hooks must be absent when all fingerprint spoofs are off"
+        );
+    }
+
+    // Audit regression: the Intl shim must not mutate the caller's options
+    // object (observable side effect).
+    #[test]
+    fn test_intl_shim_clones_options() {
+        let script = build_evasion_script(&StealthConfig::default());
+        assert!(
+            script.contains("Object.assign({}, options)"),
+            "Intl.DateTimeFormat shim must clone options before injecting timeZone"
         );
     }
 }
